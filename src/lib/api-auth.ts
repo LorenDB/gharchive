@@ -4,37 +4,26 @@ import {
   isOidcConfigured,
   type SessionUser,
 } from '@/lib/auth';
-import { AUTOLOGIN_USER_ID, enterUserContext } from '@/lib/user-context';
+import { AUTOLOGIN_USER_ID, runAsUserAsync } from '@/lib/user-context';
+
+const AUTOLOGIN_USER: SessionUser = {
+  id: AUTOLOGIN_USER_ID,
+  username: 'admin',
+  email: null,
+  name: 'Admin (autologin)',
+  role: 'admin',
+};
 
 /**
- * Call at the start of protected API handlers.
- * - 401 when SSO is on and unauthenticated
- * - Binds AsyncLocalStorage user context for multi-tenant db access
+ * Resolve the current user (SSO session or autologin).
+ * Returns a 401 Response when SSO is required and missing.
  */
-export async function ensureApiAuth(): Promise<NextResponse | null> {
-  const user = await getCurrentUser();
-  if (!user) {
-    if (isOidcConfigured()) {
-      return NextResponse.json(
-        { error: 'Authentication required' },
-        { status: 401 }
-      );
-    }
-    enterUserContext(AUTOLOGIN_USER_ID);
-    return null;
-  }
-  enterUserContext(user.id);
-  return null;
-}
-
-/** Like ensureApiAuth but also returns the session user. */
-export async function requireApiUser(): Promise<
-  { user: SessionUser; error?: undefined } | { user?: undefined; error: NextResponse }
+export async function resolveApiUser(): Promise<
+  { user: SessionUser } | { error: NextResponse }
 > {
-  const denied = await ensureApiAuth();
-  if (denied) return { error: denied };
   const user = await getCurrentUser();
-  if (!user) {
+  if (user) return { user };
+  if (isOidcConfigured()) {
     return {
       error: NextResponse.json(
         { error: 'Authentication required' },
@@ -42,6 +31,19 @@ export async function requireApiUser(): Promise<
       ),
     };
   }
-  enterUserContext(user.id);
-  return { user };
+  return { user: AUTOLOGIN_USER };
 }
+
+/**
+ * Run an API handler with multi-tenant user context bound for the full
+ * async lifetime of the handler (survives further awaits via als.run).
+ */
+export async function withApiUser(
+  handler: (user: SessionUser) => Promise<NextResponse> | NextResponse
+): Promise<NextResponse> {
+  const resolved = await resolveApiUser();
+  if ('error' in resolved) return resolved.error;
+  const { user } = resolved;
+  return runAsUserAsync(user.id, async () => handler(user));
+}
+

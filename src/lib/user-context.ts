@@ -19,14 +19,6 @@ export async function runAsUserAsync<T>(
   return als.run({ userId }, fn);
 }
 
-/**
- * Bind the current async continuation to `userId` (for handlers that
- * already `await`ed auth before calling into the db).
- */
-export function enterUserContext(userId: string): void {
-  als.enterWith({ userId });
-}
-
 export function tryGetUserId(): string | undefined {
   return als.getStore()?.userId;
 }
@@ -36,7 +28,7 @@ export function getRequiredUserId(): string {
   const id = tryGetUserId();
   if (!id) {
     throw new Error(
-      'No user context — call ensureApiAuth / runAsUser before accessing user data'
+      'No user context — wrap the handler in withApiUser / runAsUserAsync'
     );
   }
   return id;

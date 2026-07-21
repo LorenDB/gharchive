@@ -5,22 +5,22 @@ import {
   setRepoLists,
   getLists,
 } from '@/lib/db';
-import { ensureApiAuth } from '@/lib/api-auth';
+import { withApiUser } from '@/lib/api-auth';
 
 export async function GET(
   _req: NextRequest,
   { params }: { params: { id: string } }
 ) {
-  const denied = await ensureApiAuth();
-  if (denied) return denied;
-  const id = parseInt(params.id, 10);
-  const repo = getDb().repos.find((r) => r.id === id);
-  if (!repo) {
-    return NextResponse.json({ error: 'Not found' }, { status: 404 });
-  }
-  return NextResponse.json({
-    lists: getRepoLists(id),
-    all_lists: getLists(),
+  return withApiUser(async () => {
+    const id = parseInt(params.id, 10);
+    const repo = getDb().repos.find((r) => r.id === id);
+    if (!repo) {
+      return NextResponse.json({ error: 'Not found' }, { status: 404 });
+    }
+    return NextResponse.json({
+      lists: getRepoLists(id),
+      all_lists: getLists(),
+    });
   });
 }
 
@@ -29,22 +29,22 @@ export async function PUT(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
-  const denied = await ensureApiAuth();
-  if (denied) return denied;
-  const id = parseInt(params.id, 10);
-  const repo = getDb().repos.find((r) => r.id === id);
-  if (!repo) {
-    return NextResponse.json({ error: 'Not found' }, { status: 404 });
-  }
+  return withApiUser(async () => {
+    const id = parseInt(params.id, 10);
+    const repo = getDb().repos.find((r) => r.id === id);
+    if (!repo) {
+      return NextResponse.json({ error: 'Not found' }, { status: 404 });
+    }
 
-  try {
-    const body = await req.json();
-    const listIds = Array.isArray(body.list_ids)
-      ? body.list_ids.map((n: any) => parseInt(n, 10)).filter((n: number) => !isNaN(n))
-      : [];
-    setRepoLists(id, listIds);
-    return NextResponse.json({ lists: getRepoLists(id) });
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 400 });
-  }
+    try {
+      const body = await req.json();
+      const listIds = Array.isArray(body.list_ids)
+        ? body.list_ids.map((n: any) => parseInt(n, 10)).filter((n: number) => !isNaN(n))
+        : [];
+      setRepoLists(id, listIds);
+      return NextResponse.json({ lists: getRepoLists(id) });
+    } catch (err: any) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
+  });
 }
