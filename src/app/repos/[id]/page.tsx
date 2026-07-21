@@ -64,15 +64,31 @@ export default function RepoDetail() {
   }
 
   if (loading) {
-    return <p className="text-gray-500 text-sm">Loading...</p>;
+    return (
+      <div className="space-y-4">
+        <div className="h-8 w-48 rounded-lg bg-ink-900 animate-pulse" />
+        <div className="h-4 w-72 rounded bg-ink-900/80 animate-pulse" />
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mt-6">
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="stat-card h-20 animate-pulse" />
+          ))}
+        </div>
+      </div>
+    );
   }
 
   if (!repo) {
-    return <p className="text-gray-500">Repository not found.</p>;
+    return (
+      <div className="surface px-6 py-12 text-center">
+        <p className="text-ink-400">Repository not found.</p>
+        <button onClick={() => router.push('/')} className="btn-ghost mt-4">
+          ← Back to library
+        </button>
+      </div>
+    );
   }
 
-  const platformColor =
-    repo.platform === 'github' ? 'text-gray-300' : 'text-orange-400';
+  const isGithub = repo.platform === 'github';
 
   const tabs: { id: Tab; label: string; count?: number }[] = [
     { id: 'code', label: 'Code' },
@@ -82,145 +98,163 @@ export default function RepoDetail() {
 
   return (
     <div>
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 mb-6">
-        <div>
-          <button
-            onClick={() => router.push('/')}
-            className="text-sm text-gray-500 hover:text-gray-300 mb-2"
-          >
-            &larr; Back
-          </button>
-          <h1 className="text-xl font-semibold flex items-center gap-2 flex-wrap">
-            <span className={platformColor}>
-              {repo.platform === 'github' ? 'GH' : 'GL'}
+      <button
+        onClick={() => router.push('/')}
+        className="btn-ghost !px-0 !py-0 mb-4 text-ink-500 hover:text-ink-200"
+      >
+        ← Library
+      </button>
+
+      <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-5 mb-8">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2 mb-2">
+            <span
+              className={`badge ${
+                isGithub
+                  ? 'bg-ink-850 text-ink-200 border border-ink-700'
+                  : 'bg-orange-500/10 text-orange-300 border border-orange-500/25'
+              }`}
+            >
+              {isGithub ? 'GitHub' : 'GitLab'}
             </span>
-            <span className="font-mono">
-              {repo.owner}/{repo.name}
-            </span>
+            {repo.last_synced_at && (
+              <span className="badge-mint">
+                synced {formatRelativeTime(repo.last_synced_at)}
+              </span>
+            )}
+          </div>
+          <h1 className="text-2xl font-semibold tracking-tight font-mono text-white break-all">
+            <span className="text-ink-400">{repo.owner}</span>
+            <span className="text-ink-600">/</span>
+            {repo.name}
           </h1>
-          <p className="text-sm text-gray-500 mt-1 font-mono break-all">
+          <p className="text-sm text-ink-500 mt-2 font-mono break-all">
             {repo.clone_url}
           </p>
           {repo.last_synced_at && (
-            <p className="text-xs text-gray-600 mt-2">
-              Last synced {formatRelativeTime(repo.last_synced_at)}
-              <span className="text-gray-700"> · </span>
-              {formatDate(repo.last_synced_at)}
+            <p className="text-xs text-ink-600 mt-2">
+              Last full sync {formatDate(repo.last_synced_at)}
             </p>
           )}
         </div>
-        <div className="flex gap-2 shrink-0">
+        <div className="flex flex-wrap gap-2 shrink-0">
           <button
             onClick={handleSync}
             disabled={syncing}
-            className="px-4 py-2 rounded-lg bg-white text-black font-medium text-sm hover:bg-gray-200 disabled:opacity-50 transition-colors"
+            className="btn-primary"
           >
-            {syncing ? 'Syncing…' : 'Sync Now'}
+            {syncing ? (
+              <>
+                <Spinner /> Syncing…
+              </>
+            ) : (
+              <>
+                <SyncIcon /> Sync now
+              </>
+            )}
           </button>
-          <button
-            onClick={handleDelete}
-            className="px-4 py-2 rounded-lg border border-red-800 text-red-400 font-medium text-sm hover:bg-red-900/30 transition-colors"
-          >
+          <button onClick={handleDelete} className="btn-danger">
             Delete
           </button>
         </div>
       </div>
 
       {syncError && (
-        <p className="mb-4 text-sm text-red-400">{syncError}</p>
+        <div className="mb-6 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
+          {syncError}
+        </div>
       )}
 
-      {/* Stats */}
-      <div className="grid gap-3 grid-cols-2 lg:grid-cols-4 mb-6">
+      <div className="grid gap-3 grid-cols-2 lg:grid-cols-4 mb-8">
         <Stat label="Branches" value={repo.branch_count ?? '—'} />
         <Stat label="Tags" value={repo.tag_count ?? '—'} />
         <Stat label="Releases" value={releases.length} />
         <Stat
           label="Mirror size"
-          value={
-            repo.size_bytes != null ? formatBytes(repo.size_bytes) : '—'
-          }
+          value={repo.size_bytes != null ? formatBytes(repo.size_bytes) : '—'}
         />
       </div>
 
-      {/* Tabs */}
-      <div className="border-b border-gray-800 mb-4">
-        <nav className="flex gap-1 -mb-px">
-          {tabs.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
-              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                tab === t.id
-                  ? 'border-white text-white'
-                  : 'border-transparent text-gray-500 hover:text-gray-300 hover:border-gray-700'
-              }`}
-            >
-              {t.label}
-              {typeof t.count === 'number' && (
-                <span
-                  className={`ml-2 inline-flex items-center justify-center min-w-[1.25rem] px-1.5 py-0.5 rounded-full text-[10px] ${
-                    tab === t.id
-                      ? 'bg-gray-700 text-gray-200'
-                      : 'bg-gray-900 text-gray-500'
-                  }`}
-                >
-                  {t.count}
-                </span>
-              )}
-            </button>
-          ))}
+      <div className="border-b border-ink-800 mb-5">
+        <nav className="flex gap-1 -mb-px overflow-x-auto">
+          {tabs.map((t) => {
+            const active = tab === t.id;
+            return (
+              <button
+                key={t.id}
+                onClick={() => setTab(t.id)}
+                className={active ? 'tab-btn-active' : 'tab-btn-idle'}
+              >
+                {t.label}
+                {typeof t.count === 'number' && (
+                  <span
+                    className={`ml-2 inline-flex min-w-[1.25rem] justify-center rounded-full px-1.5 py-0.5 text-[10px] font-mono ${
+                      active
+                        ? 'bg-amber-400/15 text-amber-300'
+                        : 'bg-ink-850 text-ink-500'
+                    }`}
+                  >
+                    {t.count}
+                  </span>
+                )}
+                {active && (
+                  <span className="absolute bottom-0 left-2 right-2 h-0.5 rounded-full bg-amber-400" />
+                )}
+              </button>
+            );
+          })}
         </nav>
       </div>
 
       {tab === 'code' && <RepoTree repoId={String(id)} />}
-
       {tab === 'releases' && (
         <ReleasesViewer repoId={id} releases={releases} />
       )}
-
       {tab === 'activity' && (
         <section>
           {syncLogs.length === 0 ? (
-            <p className="text-sm text-gray-600">No sync history yet.</p>
+            <div className="surface px-6 py-10 text-center text-sm text-ink-500">
+              No sync history yet.
+            </div>
           ) : (
-            <div className="overflow-x-auto rounded-lg border border-gray-800">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left text-gray-500 border-b border-gray-800 bg-gray-900/50">
-                    <th className="px-4 py-2.5">Status</th>
-                    <th className="px-4 py-2.5">Time</th>
-                    <th className="px-4 py-2.5">Message</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {syncLogs.map((log: any) => (
-                    <tr
-                      key={log.id}
-                      className="border-b border-gray-800/50 last:border-0"
-                    >
-                      <td className="px-4 py-2.5">
-                        <span
-                          className={
-                            log.status === 'success'
-                              ? 'text-green-400'
-                              : 'text-red-400'
-                          }
-                        >
-                          {log.status}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2.5 text-gray-500 font-mono text-xs whitespace-nowrap">
-                        {formatDate(log.created_at)}
-                      </td>
-                      <td className="px-4 py-2.5 text-gray-400 font-mono text-xs max-w-md truncate">
-                        {log.message || '—'}
-                      </td>
+            <div className="surface overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-ink-500 border-b border-ink-800 bg-ink-950/50">
+                      <th className="px-4 py-3 font-medium">Status</th>
+                      <th className="px-4 py-3 font-medium">Time</th>
+                      <th className="px-4 py-3 font-medium">Message</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {syncLogs.map((log: any) => (
+                      <tr
+                        key={log.id}
+                        className="border-b border-ink-800/50 last:border-0 hover:bg-ink-900/40"
+                      >
+                        <td className="px-4 py-3">
+                          <span
+                            className={
+                              log.status === 'success'
+                                ? 'badge-mint'
+                                : 'badge bg-red-500/10 text-red-400 border border-red-500/25'
+                            }
+                          >
+                            {log.status}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-ink-500 font-mono text-xs whitespace-nowrap">
+                          {formatDate(log.created_at)}
+                        </td>
+                        <td className="px-4 py-3 text-ink-400 font-mono text-xs max-w-md truncate">
+                          {log.message || '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
         </section>
@@ -231,9 +265,28 @@ export default function RepoDetail() {
 
 function Stat({ label, value }: { label: string; value: number | string }) {
   return (
-    <div className="p-3 rounded-lg border border-gray-800 bg-gray-900/50">
-      <p className="text-xs text-gray-500 mb-1">{label}</p>
-      <p className="text-xl font-semibold tabular-nums">{value}</p>
+    <div className="stat-card">
+      <p className="text-[11px] uppercase tracking-wide text-ink-500 mb-1">
+        {label}
+      </p>
+      <p className="text-xl font-semibold tabular-nums text-white">{value}</p>
     </div>
+  );
+}
+
+function SyncIcon() {
+  return (
+    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 16 16" aria-hidden>
+      <path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z" />
+    </svg>
+  );
+}
+
+function Spinner() {
+  return (
+    <svg className="h-3.5 w-3.5 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v3a5 5 0 00-5 5H4z" />
+    </svg>
   );
 }

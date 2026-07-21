@@ -6,6 +6,7 @@ import {
   tagExists as dbTagExists,
   assetExists,
   getReleaseByTag,
+  getSettings,
 } from '@/lib/db';
 import { syncMirror } from '@/lib/git';
 import {
@@ -31,6 +32,7 @@ export async function syncRepo(
   options: { skipGit?: boolean } = {}
 ): Promise<{ ok: boolean; messages: string[]; error?: string }> {
   const messages: string[] = [];
+  const settings = getSettings();
 
   if (!options.skipGit) {
     try {
@@ -57,6 +59,11 @@ export async function syncRepo(
 
     let newReleases = 0;
     let newAssets = 0;
+    let skippedAssets = 0;
+    const maxBytes =
+      settings.max_asset_size_mb > 0
+        ? settings.max_asset_size_mb * 1024 * 1024
+        : Infinity;
 
     for (const rel of releases) {
       if (!dbTagExists(repo.id, rel.tag_name)) {
@@ -84,9 +91,16 @@ export async function syncRepo(
           asset.name
         );
 
-        const downloaded = asset.download_url
-          ? await downloadReleaseAsset(asset.download_url, assetPath)
-          : false;
+        let downloaded = false;
+        const tooLarge = asset.size > 0 && asset.size > maxBytes;
+
+        if (!settings.download_release_assets) {
+          skippedAssets++;
+        } else if (tooLarge) {
+          skippedAssets++;
+        } else if (asset.download_url) {
+          downloaded = await downloadReleaseAsset(asset.download_url, assetPath);
+        }
 
         addReleaseAsset({
           release_id: releaseRow.id,
@@ -96,13 +110,13 @@ export async function syncRepo(
           file_path: downloaded ? assetPath : null,
           download_url: asset.download_url || null,
         });
-        newAssets++;
+        if (downloaded) newAssets++;
       }
     }
 
-    messages.push(
-      `releases: ${releases.length} fetched (${newReleases} new, ${newAssets} assets)`
-    );
+    let releaseMsg = `releases: ${releases.length} fetched (${newReleases} new, ${newAssets} assets)`;
+    if (skippedAssets > 0) releaseMsg += `, ${skippedAssets} skipped`;
+    messages.push(releaseMsg);
   } catch (err: any) {
     messages.push(`releases: failed - ${err.message}`);
   }

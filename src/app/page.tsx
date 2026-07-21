@@ -24,34 +24,66 @@ export default function Dashboard() {
     fetchRepos();
   }, [fetchRepos]);
 
+  const synced = repos.filter((r) => r.last_synced_at).length;
+
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-8">
         <div>
-          <h1 className="text-xl font-semibold">Repositories</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            {repos.length} archived {repos.length === 1 ? 'repo' : 'repos'}
+          <p className="text-xs font-medium uppercase tracking-widest text-amber-400/80 mb-2">
+            Library
+          </p>
+          <h1 className="page-title">Repositories</h1>
+          <p className="page-subtitle">
+            {loading
+              ? 'Loading archive…'
+              : repos.length === 0
+                ? 'Your vault is empty — add a repository to begin.'
+                : `${repos.length} archived · ${synced} synced`}
           </p>
         </div>
         <AddRepoForm onAdded={fetchRepos} />
       </div>
 
       {loading ? (
-        <p className="text-gray-500 text-sm">Loading...</p>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {[0, 1, 2].map((i) => (
+            <div
+              key={i}
+              className="surface h-36 animate-pulse bg-ink-900/40"
+            />
+          ))}
+        </div>
       ) : repos.length === 0 ? (
-        <div className="text-center py-20">
-          <p className="text-gray-500 mb-2">No repositories archived yet.</p>
-          <p className="text-gray-600 text-sm">
-            Add a GitHub or GitLab repository to start archiving.
+        <div className="surface relative overflow-hidden px-6 py-16 text-center">
+          <div className="absolute inset-0 bg-gradient-to-b from-amber-400/5 to-transparent pointer-events-none" />
+          <div className="relative mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-ink-850 border border-ink-700 text-amber-400 mb-5 shadow-glow">
+            <EmptyIcon />
+          </div>
+          <h2 className="text-lg font-semibold text-white mb-2">
+            No repositories yet
+          </h2>
+          <p className="text-sm text-ink-400 max-w-sm mx-auto mb-6">
+            Mirror any public GitHub or GitLab repository. History, tags, and
+            release assets stay on your machine.
           </p>
+          <AddRepoForm onAdded={fetchRepos} />
         </div>
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {repos.map((repo) => (
             <RepoCard key={repo.id} repo={repo} />
           ))}
         </div>
       )}
     </div>
+  );
+}
+
+function EmptyIcon() {
+  return (
+    <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 16 16" aria-hidden>
+      <path d="M1.75 2.5a.25.25 0 0 0-.25.25v1.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25v-1.5a.25.25 0 0 0-.25-.25ZM0 2.75C0 1.784.784 1 1.75 1h12.5c.966 0 1.75.784 1.75 1.75v1.5A1.75 1.75 0 0 1 14.25 6H1.75A1.75 1.75 0 0 1 0 4.25ZM1.75 7a.75.75 0 0 1 .75.75v5.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-5.5a.75.75 0 0 1 1.5 0v5.5A1.75 1.75 0 0 1 13.25 15H2.75A1.75 1.75 0 0 1 1 13.25v-5.5A.75.75 0 0 1 1.75 7Zm4.5 1a.75.75 0 0 0 0 1.5h3.5a.75.75 0 0 0 0-1.5Z" />
+    </svg>
   );
 }

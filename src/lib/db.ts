@@ -4,11 +4,36 @@ import fs from 'fs';
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const DB_PATH = path.join(DATA_DIR, 'db.json');
 
+export interface Settings {
+  /** Master switch for scheduled archive updates */
+  auto_sync_enabled: boolean;
+  /**
+   * How often to re-sync each repo, in hours.
+   * Common values: 1, 6, 12, 24, 48, 168 (weekly)
+   */
+  sync_interval_hours: number;
+  /** Download release asset binaries during sync */
+  download_release_assets: boolean;
+  /** Skip assets larger than this many MB (0 = no limit) */
+  max_asset_size_mb: number;
+  /** How many repos to sync in parallel during a scheduled run */
+  concurrent_syncs: number;
+}
+
+export const DEFAULT_SETTINGS: Settings = {
+  auto_sync_enabled: true,
+  sync_interval_hours: 24,
+  download_release_assets: true,
+  max_asset_size_mb: 500,
+  concurrent_syncs: 1,
+};
+
 interface Data {
   repos: Repo[];
   releases: Release[];
   release_assets: ReleaseAsset[];
   sync_logs: SyncLog[];
+  settings: Settings;
 }
 
 interface Repo {
@@ -62,12 +87,19 @@ function load(): Data {
   if (fs.existsSync(DB_PATH)) {
     data = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
   } else {
-    data = { repos: [], releases: [], release_assets: [], sync_logs: [] };
+    data = {
+      repos: [],
+      releases: [],
+      release_assets: [],
+      sync_logs: [],
+      settings: { ...DEFAULT_SETTINGS },
+    };
   }
   const d = data!;
   for (const key of ['repos', 'releases', 'release_assets', 'sync_logs'] as const) {
     if (!Array.isArray((d as any)[key])) (d as any)[key] = [];
   }
+  d.settings = { ...DEFAULT_SETTINGS, ...(d.settings || {}) };
   nextIds.repos = d.repos.reduce((max, r) => Math.max(max, r.id), 0) + 1;
   nextIds.releases = d.releases.reduce((max, r) => Math.max(max, r.id), 0) + 1;
   nextIds.release_assets = d.release_assets.reduce((max, r) => Math.max(max, r.id), 0) + 1;
@@ -87,7 +119,19 @@ export function getDb() {
     releases: load().releases,
     releaseAssets: load().release_assets,
     syncLogs: load().sync_logs,
+    settings: load().settings,
   };
+}
+
+export function getSettings(): Settings {
+  return { ...load().settings };
+}
+
+export function updateSettings(partial: Partial<Settings>): Settings {
+  load();
+  data!.settings = { ...data!.settings, ...partial };
+  save();
+  return { ...data!.settings };
 }
 
 export function addRepo(repo: Omit<Repo, 'id' | 'created_at'>): Repo {
@@ -114,11 +158,12 @@ export function updateRepo(id: number, updates: Partial<Pick<Repo, 'last_synced_
 
 export function deleteRepo(id: number) {
   load();
+  const releaseIds = new Set(
+    data!.releases.filter((r) => r.repo_id === id).map((r) => r.id)
+  );
   data!.repos = data!.repos.filter((r) => r.id !== id);
   data!.releases = data!.releases.filter((r) => r.repo_id !== id);
-  data!.release_assets = data!.release_assets.filter(
-    (a) => !data!.releases.some((r) => r.id === a.release_id)
-  );
+  data!.release_assets = data!.release_assets.filter((a) => !releaseIds.has(a.release_id));
   data!.sync_logs = data!.sync_logs.filter((l) => l.repo_id !== id);
   save();
 }

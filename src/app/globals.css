@@ -2,6 +2,114 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  color-scheme: dark;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
 body {
-  @apply bg-gray-950 text-gray-100;
+  @apply bg-ink-975 text-ink-100 antialiased min-h-screen;
+  background-image: theme('backgroundImage.grid-fade');
+  background-attachment: fixed;
+}
+
+/* Selection */
+::selection {
+  @apply bg-amber-400/30 text-white;
+}
+
+/* Scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: theme('colors.ink.700') transparent;
+}
+
+@layer components {
+  .surface {
+    @apply rounded-xl border border-ink-800/90 bg-ink-900/70 shadow-card backdrop-blur-sm;
+  }
+
+  .surface-solid {
+    @apply rounded-xl border border-ink-800 bg-ink-900 shadow-card;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-all duration-150 disabled:opacity-50 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/50 focus-visible:ring-offset-2 focus-visible:ring-offset-ink-975;
+  }
+
+  .btn-primary {
+    @apply btn bg-amber-400 text-ink-975 hover:bg-amber-300 active:scale-[0.98] shadow-sm shadow-amber-400/10;
+  }
+
+  .btn-secondary {
+    @apply btn border border-ink-700 bg-ink-850/80 text-ink-100 hover:bg-ink-800 hover:border-ink-600;
+  }
+
+  .btn-ghost {
+    @apply btn text-ink-400 hover:text-ink-100 hover:bg-ink-850;
+  }
+
+  .btn-danger {
+    @apply btn border border-red-900/80 text-red-400 hover:bg-red-950/50 hover:border-red-800;
+  }
+
+  .input {
+    @apply w-full rounded-lg border border-ink-700 bg-ink-950/80 px-3 py-2.5 text-sm text-ink-100 placeholder:text-ink-500 shadow-inner transition-colors focus:border-amber-400/50 focus:outline-none focus:ring-2 focus:ring-amber-400/20;
+  }
+
+  .label {
+    @apply block text-sm font-medium text-ink-200 mb-1.5;
+  }
+
+  .hint {
+    @apply text-xs text-ink-500 mt-1.5 leading-relaxed;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium tracking-wide;
+  }
+
+  .badge-amber {
+    @apply badge bg-amber-400/10 text-amber-300 border border-amber-400/20;
+  }
+
+  .badge-mint {
+    @apply badge bg-mint-400/10 text-mint-400 border border-mint-400/20;
+  }
+
+  .badge-muted {
+    @apply badge bg-ink-850 text-ink-400 border border-ink-700;
+  }
+
+  .page-title {
+    @apply text-2xl font-semibold tracking-tight text-white;
+  }
+
+  .page-subtitle {
+    @apply text-sm text-ink-400 mt-1;
+  }
+
+  .stat-card {
+    @apply surface p-4;
+  }
+
+  .tab-btn {
+    @apply relative px-4 py-2.5 text-sm font-medium transition-colors;
+  }
+
+  .tab-btn-active {
+    @apply tab-btn text-white;
+  }
+
+  .tab-btn-idle {
+    @apply tab-btn text-ink-500 hover:text-ink-200;
+  }
+}
+
+/* Code viewer line numbers stay readable */
+.blob-gutter {
+  background: linear-gradient(90deg, theme('colors.ink.950'), theme('colors.ink.950') 90%, transparent);
 }

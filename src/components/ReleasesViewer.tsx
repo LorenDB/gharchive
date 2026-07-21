@@ -32,9 +32,9 @@ export default function ReleasesViewer({
 
   if (releases.length === 0) {
     return (
-      <div className="rounded-lg border border-gray-800 px-4 py-10 text-center">
-        <p className="text-sm text-gray-500">No releases archived yet.</p>
-        <p className="text-xs text-gray-600 mt-1">
+      <div className="surface px-6 py-12 text-center">
+        <p className="text-sm text-ink-400">No releases archived yet.</p>
+        <p className="text-xs text-ink-600 mt-1.5">
           Sync this repository to fetch releases and download assets.
         </p>
       </div>
@@ -50,11 +50,8 @@ export default function ReleasesViewer({
           rel.assets?.filter((a) => !a.file_path && a.download_url) ?? [];
 
         return (
-          <article
-            key={rel.id}
-            className="rounded-lg border border-gray-800 bg-gray-900/40 overflow-hidden"
-          >
-            <header className="flex flex-wrap items-start justify-between gap-3 px-4 py-3 border-b border-gray-800/80">
+          <article key={rel.id} className="surface overflow-hidden">
+            <header className="flex flex-wrap items-start justify-between gap-3 px-4 sm:px-5 py-4 border-b border-ink-800/80 bg-ink-950/30">
               <div className="min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
                   <h3 className="text-base font-semibold text-white">
@@ -62,40 +59,36 @@ export default function ReleasesViewer({
                       ? rel.name
                       : rel.tag_name}
                   </h3>
-                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-mono border border-green-900/60 bg-green-950/40 text-green-400">
-                    {rel.tag_name}
-                  </span>
+                  <span className="badge-mint font-mono">{rel.tag_name}</span>
                 </div>
                 {rel.published_at && (
-                  <p className="text-xs text-gray-500 mt-1">
+                  <p className="text-xs text-ink-500 mt-1.5">
                     Published {formatDateShort(rel.published_at)}
                   </p>
                 )}
               </div>
               <button
-                onClick={() =>
-                  setExpanded((e) => ({ ...e, [rel.id]: !isOpen }))
-                }
-                className="text-xs text-gray-500 hover:text-gray-300"
+                onClick={() => setExpanded((e) => ({ ...e, [rel.id]: !isOpen }))}
+                className="btn-ghost !py-1 !px-2 text-xs"
               >
                 {isOpen ? 'Collapse' : 'Expand'}
               </button>
             </header>
 
             {isOpen && (
-              <div className="px-4 py-3 space-y-4">
+              <div className="px-4 sm:px-5 py-4 space-y-4">
                 {rel.body && (
-                  <div className="prose-release text-sm text-gray-400 whitespace-pre-wrap break-words max-h-64 overflow-y-auto">
+                  <div className="text-sm text-ink-400 whitespace-pre-wrap break-words max-h-64 overflow-y-auto leading-relaxed">
                     {rel.body}
                   </div>
                 )}
 
                 {rel.assets && rel.assets.length > 0 && (
                   <div>
-                    <h4 className="text-xs font-medium uppercase tracking-wide text-gray-500 mb-2">
+                    <h4 className="text-[11px] font-medium uppercase tracking-wide text-ink-500 mb-2">
                       Assets ({rel.assets.length})
                     </h4>
-                    <ul className="divide-y divide-gray-800/80 rounded-md border border-gray-800 overflow-hidden">
+                    <ul className="divide-y divide-ink-800/80 rounded-lg border border-ink-800 overflow-hidden">
                       {rel.assets.map((asset) => {
                         const isLocal = Boolean(asset.file_path);
                         const href = isLocal
@@ -105,37 +98,33 @@ export default function ReleasesViewer({
                         return (
                           <li
                             key={asset.id}
-                            className="flex items-center justify-between gap-3 px-3 py-2 bg-gray-950/40 hover:bg-gray-900/60"
+                            className="flex items-center justify-between gap-3 px-3 py-2.5 bg-ink-950/30 hover:bg-ink-900/50 transition-colors"
                           >
                             <div className="flex items-center gap-2 min-w-0">
                               <PackageIcon />
                               {href ? (
                                 <a
                                   href={href}
-                                  className="font-mono text-sm text-blue-400 hover:underline truncate"
+                                  className="font-mono text-sm text-amber-400 hover:text-amber-300 truncate"
                                   download={isLocal ? asset.name : undefined}
                                   target={isLocal ? undefined : '_blank'}
-                                  rel={
-                                    isLocal ? undefined : 'noopener noreferrer'
-                                  }
+                                  rel={isLocal ? undefined : 'noopener noreferrer'}
                                 >
                                   {asset.name}
                                 </a>
                               ) : (
-                                <span className="font-mono text-sm text-gray-300 truncate">
+                                <span className="font-mono text-sm text-ink-300 truncate">
                                   {asset.name}
                                 </span>
                               )}
                             </div>
                             <div className="flex items-center gap-3 shrink-0 text-xs">
-                              <span className="text-gray-600 font-mono">
+                              <span className="text-ink-600 font-mono">
                                 {formatBytes(asset.size)}
                               </span>
                               <span
                                 className={
-                                  isLocal
-                                    ? 'text-green-500'
-                                    : 'text-yellow-600'
+                                  isLocal ? 'badge-mint' : 'badge-amber'
                                 }
                                 title={
                                   isLocal
@@ -151,7 +140,7 @@ export default function ReleasesViewer({
                       })}
                     </ul>
                     {(localAssets.length > 0 || remoteOnly.length > 0) && (
-                      <p className="text-[11px] text-gray-600 mt-2">
+                      <p className="text-[11px] text-ink-600 mt-2">
                         {localAssets.length} local
                         {remoteOnly.length > 0
                           ? ` · ${remoteOnly.length} remote-only`
@@ -162,7 +151,7 @@ export default function ReleasesViewer({
                 )}
 
                 {(!rel.assets || rel.assets.length === 0) && (
-                  <p className="text-xs text-gray-600">No assets for this release.</p>
+                  <p className="text-xs text-ink-600">No assets for this release.</p>
                 )}
               </div>
             )}
@@ -175,12 +164,7 @@ export default function ReleasesViewer({
 
 function PackageIcon() {
   return (
-    <svg
-      className="w-4 h-4 text-gray-500 shrink-0"
-      fill="currentColor"
-      viewBox="0 0 16 16"
-      aria-hidden
-    >
+    <svg className="w-4 h-4 text-ink-500 shrink-0" fill="currentColor" viewBox="0 0 16 16" aria-hidden>
       <path d="m8.878.392 5.25 3.045c.54.314.872.89.872 1.514v6.098a1.75 1.75 0 0 1-.872 1.514l-5.25 3.045a1.75 1.75 0 0 1-1.756 0l-5.25-3.045A1.75 1.75 0 0 1 1 11.049V4.951c0-.624.332-1.201.872-1.514L7.122.392a1.75 1.75 0 0 1 1.756 0ZM7.875 1.69l-4.63 2.685L8 7.133l4.755-2.758-4.63-2.685a.248.248 0 0 0-.25 0ZM2.5 5.677v5.372c0 .09.047.171.125.216l4.625 2.683V8.432Zm6.25 8.271 4.625-2.683a.25.25 0 0 0 .125-.216V5.677L8.75 8.432Z" />
     </svg>
   );
