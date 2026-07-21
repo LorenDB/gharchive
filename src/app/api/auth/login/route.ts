@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
+  appUrl,
   buildAuthorizationUrl,
   fetchOidcMetadata,
   getOidcConfig,
@@ -21,7 +22,7 @@ function safeReturnTo(path: string | null): string {
 
 export async function GET(req: NextRequest) {
   if (!isOidcConfigured()) {
-    return NextResponse.redirect(new URL('/', req.url));
+    return NextResponse.redirect(appUrl('/'));
   }
 
   const config = getOidcConfig();
@@ -58,8 +59,8 @@ export async function GET(req: NextRequest) {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'OIDC login failed';
     console.error('[auth/login]', message);
-    const loginUrl = new URL('/login', req.url);
+    const loginUrl = new URL(appUrl('/login'));
     loginUrl.searchParams.set('error', message);
-    return NextResponse.redirect(loginUrl);
+    return NextResponse.redirect(loginUrl.toString());
   }
 }

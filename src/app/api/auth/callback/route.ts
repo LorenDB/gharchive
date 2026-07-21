@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
+  appUrl,
   claimsToUsername,
   decodeJwtPayload,
   exchangeCode,
@@ -25,41 +26,41 @@ function safeReturnTo(path: string | null | undefined): string {
   return path;
 }
 
-function redirectLoginError(req: NextRequest, message: string) {
-  const url = new URL('/login', req.url);
+function redirectLoginError(message: string) {
+  const url = new URL(appUrl('/login'));
   url.searchParams.set('error', message);
-  const res = NextResponse.redirect(url);
+  const res = NextResponse.redirect(url.toString());
   res.cookies.set(OAUTH_COOKIE, '', clearCookieOptions());
   return res;
 }
 
 export async function GET(req: NextRequest) {
   if (!isOidcConfigured()) {
-    return NextResponse.redirect(new URL('/', req.url));
+    return NextResponse.redirect(appUrl('/'));
   }
 
   const config = getOidcConfig();
   if (!config) {
-    return redirectLoginError(req, 'OIDC is not configured');
+    return redirectLoginError('OIDC is not configured');
   }
 
   const error = req.nextUrl.searchParams.get('error');
   if (error) {
     const desc =
       req.nextUrl.searchParams.get('error_description') || error;
-    return redirectLoginError(req, desc);
+    return redirectLoginError(desc);
   }
 
   const code = req.nextUrl.searchParams.get('code');
   const state = req.nextUrl.searchParams.get('state');
   if (!code || !state) {
-    return redirectLoginError(req, 'Missing authorization code or state');
+    return redirectLoginError('Missing authorization code or state');
   }
 
   const oauthCookie = req.cookies.get(OAUTH_COOKIE)?.value;
   const oauth = await readOAuthStateToken(oauthCookie);
   if (!oauth || oauth.state !== state) {
-    return redirectLoginError(req, 'Invalid or expired OAuth state');
+    return redirectLoginError('Invalid or expired OAuth state');
   }
 
   try {
@@ -84,7 +85,6 @@ export async function GET(req: NextRequest) {
     }
     if (!claims?.sub) {
       return redirectLoginError(
-        req,
         'Could not determine user identity from OIDC provider'
       );
     }
@@ -107,7 +107,7 @@ export async function GET(req: NextRequest) {
 
     const sessionToken = await createSessionToken(user);
     const res = NextResponse.redirect(
-      new URL(safeReturnTo(oauth.returnTo), req.url)
+      appUrl(safeReturnTo(oauth.returnTo))
     );
     res.cookies.set(SESSION_COOKIE, sessionToken, sessionCookieOptions());
     res.cookies.set(OAUTH_COOKIE, '', clearCookieOptions());
@@ -115,6 +115,6 @@ export async function GET(req: NextRequest) {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'OIDC callback failed';
     console.error('[auth/callback]', message);
-    return redirectLoginError(req, message);
+    return redirectLoginError(message);
   }
 }

@@ -61,6 +61,16 @@ export function getAppUrl(): string {
   return 'http://localhost:3000';
 }
 
+/**
+ * Absolute URL for app-facing redirects (login, post-auth).
+ * Prefer APP_URL so Docker internal hostnames never leak into the browser.
+ */
+export function appUrl(path = '/'): string {
+  const base = getAppUrl();
+  if (!path || path === '/') return `${base}/`;
+  return `${base}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
 export function getOidcConfig(): OidcConfig | null {
   if (!isOidcConfigured()) return null;
   const issuer = process.env.OIDC_ISSUER!.trim().replace(/\/$/, '');

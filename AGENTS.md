@@ -31,6 +31,8 @@ You may still run:
 - No SSO → autologin as admin; `AuthWarningBanner` at top of every page
 - Multi-user: each SSO user has isolated repos/lists/settings/GitHub account
 - First SSO login claims legacy no-auth (`autologin`) data (`legacy_claimed_by`)
+- Docker: entrypoint chowns `/data` to uid 1001 so bind mounts are writable
+- Always set `APP_URL` to the browser-facing origin (not the container id)
 
 ## Key features
 
