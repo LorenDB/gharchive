@@ -1,57 +1,123 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Suspense } from 'react';
+import { useSearchParams, useRouter } from 'next/navigation';
+import Link from 'next/link';
 import RepoCard from '@/components/RepoCard';
 import AddRepoForm from '@/components/AddRepoForm';
 
-export default function Dashboard() {
+interface ListFilter {
+  id: number;
+  name: string;
+  color: string;
+  source: string;
+  repo_count: number;
+}
+
+function DashboardInner() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const listParam = searchParams.get('list');
+  const activeListId = listParam ? parseInt(listParam, 10) : null;
+
   const [repos, setRepos] = useState<any[]>([]);
+  const [lists, setLists] = useState<ListFilter[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const fetchRepos = useCallback(async () => {
+  const fetchData = useCallback(async () => {
     try {
-      const res = await fetch('/api/repos');
-      const data = await res.json();
-      setRepos(data);
+      const qs =
+        activeListId && !isNaN(activeListId)
+          ? `?list_id=${activeListId}`
+          : '';
+      const [reposRes, listsRes] = await Promise.all([
+        fetch(`/api/repos${qs}`),
+        fetch('/api/lists'),
+      ]);
+      if (reposRes.ok) setRepos(await reposRes.json());
+      if (listsRes.ok) {
+        const data = await listsRes.json();
+        setLists(data.lists || []);
+      }
     } catch {
       // ignore
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [activeListId]);
 
   useEffect(() => {
-    fetchRepos();
-  }, [fetchRepos]);
+    setLoading(true);
+    fetchData();
+  }, [fetchData]);
 
   const synced = repos.filter((r) => r.last_synced_at).length;
+  const activeList = lists.find((l) => l.id === activeListId);
+
+  function setListFilter(id: number | null) {
+    if (id == null) router.push('/');
+    else router.push(`/?list=${id}`);
+  }
 
   return (
     <div>
-      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-8">
+      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-6">
         <div>
           <p className="text-xs font-medium uppercase tracking-widest text-amber-400/80 mb-2">
             Library
           </p>
-          <h1 className="page-title">Repositories</h1>
+          <h1 className="page-title">
+            {activeList ? activeList.name : 'Repositories'}
+          </h1>
           <p className="page-subtitle">
             {loading
               ? 'Loading archive…'
               : repos.length === 0
-                ? 'Your vault is empty — add a repository to begin.'
+                ? activeList
+                  ? 'No repositories in this list.'
+                  : 'Your vault is empty — add a repository to begin.'
                 : `${repos.length} archived · ${synced} synced`}
           </p>
         </div>
-        <AddRepoForm onAdded={fetchRepos} />
+        <div className="flex flex-wrap gap-2">
+          <Link href="/import" className="btn-secondary">
+            Import stars
+          </Link>
+          <AddRepoForm onAdded={fetchData} />
+        </div>
       </div>
+
+      {/* List filters */}
+      {lists.length > 0 && (
+        <div className="flex flex-wrap gap-2 mb-6">
+          <FilterChip
+            active={activeListId == null}
+            onClick={() => setListFilter(null)}
+            label="All"
+          />
+          {lists.map((l) => (
+            <FilterChip
+              key={l.id}
+              active={activeListId === l.id}
+              onClick={() => setListFilter(l.id)}
+              label={l.name}
+              color={l.color}
+              count={l.repo_count}
+            />
+          ))}
+          <Link
+            href="/lists"
+            className="inline-flex items-center px-2.5 py-1 rounded-full text-xs text-ink-500 hover:text-ink-200 border border-dashed border-ink-700 hover:border-ink-500"
+          >
+            Manage lists
+          </Link>
+        </div>
+      )}
 
       {loading ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {[0, 1, 2].map((i) => (
-            <div
-              key={i}
-              className="surface h-36 animate-pulse bg-ink-900/40"
-            />
+            <div key={i} className="surface h-36 animate-pulse bg-ink-900/40" />
           ))}
         </div>
       ) : repos.length === 0 ? (
@@ -61,13 +127,19 @@ export default function Dashboard() {
             <EmptyIcon />
           </div>
           <h2 className="text-lg font-semibold text-white mb-2">
-            No repositories yet
+            {activeList ? 'Empty list' : 'No repositories yet'}
           </h2>
           <p className="text-sm text-ink-400 max-w-sm mx-auto mb-6">
-            Mirror any public GitHub or GitLab repository. History, tags, and
-            release assets stay on your machine.
+            {activeList
+              ? 'Assign repos to this list from a repo page, or import stars.'
+              : 'Mirror any public GitHub or GitLab repository, or import your starred repos.'}
           </p>
-          <AddRepoForm onAdded={fetchRepos} />
+          <div className="flex flex-wrap justify-center gap-2">
+            <Link href="/import" className="btn-secondary">
+              Import stars
+            </Link>
+            <AddRepoForm onAdded={fetchData} />
+          </div>
         </div>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -77,6 +149,59 @@ export default function Dashboard() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function Dashboard() {
+  return (
+    <Suspense
+      fallback={
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="surface h-36 animate-pulse bg-ink-900/40" />
+          ))}
+        </div>
+      }
+    >
+      <DashboardInner />
+    </Suspense>
+  );
+}
+
+function FilterChip({
+  active,
+  onClick,
+  label,
+  color,
+  count,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  color?: string;
+  count?: number;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium border transition-colors ${
+        active
+          ? 'border-amber-400/40 bg-amber-400/10 text-amber-300'
+          : 'border-ink-700 bg-ink-900/50 text-ink-400 hover:text-ink-200 hover:border-ink-600'
+      }`}
+    >
+      {color && (
+        <span
+          className="h-1.5 w-1.5 rounded-full"
+          style={{ backgroundColor: color }}
+        />
+      )}
+      {label}
+      {typeof count === 'number' && (
+        <span className="font-mono text-[10px] opacity-70">{count}</span>
+      )}
+    </button>
   );
 }
 

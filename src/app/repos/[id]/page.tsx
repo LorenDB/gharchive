@@ -12,12 +12,14 @@ export default function RepoDetail() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const [repo, setRepo] = useState<any>(null);
+  const [allLists, setAllLists] = useState<any[]>([]);
   const [releases, setReleases] = useState<any[]>([]);
   const [syncLogs, setSyncLogs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [tab, setTab] = useState<Tab>('code');
   const [syncError, setSyncError] = useState('');
+  const [listOpen, setListOpen] = useState(false);
 
   const fetchData = useCallback(async () => {
     const [repoRes, releaseRes] = await Promise.all([
@@ -27,6 +29,7 @@ export default function RepoDetail() {
     if (repoRes.ok) {
       const data = await repoRes.json();
       setRepo(data.repo);
+      setAllLists(data.allLists || []);
       setSyncLogs(data.syncLogs || []);
     }
     if (releaseRes.ok) {
@@ -35,6 +38,23 @@ export default function RepoDetail() {
     }
     setLoading(false);
   }, [id]);
+
+  async function toggleList(listId: number) {
+    if (!repo) return;
+    const current: number[] = (repo.lists || []).map((l: any) => l.id);
+    const next = current.includes(listId)
+      ? current.filter((x) => x !== listId)
+      : [...current, listId];
+    const res = await fetch(`/api/repos/${id}/lists`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ list_ids: next }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setRepo((r: any) => ({ ...r, lists: data.lists }));
+    }
+  }
 
   useEffect(() => {
     fetchData();
@@ -122,6 +142,7 @@ export default function RepoDetail() {
                 synced {formatRelativeTime(repo.last_synced_at)}
               </span>
             )}
+            {repo.from_star && <span className="badge-amber">from star</span>}
           </div>
           <h1 className="text-2xl font-semibold tracking-tight font-mono text-white break-all">
             <span className="text-ink-400">{repo.owner}</span>
@@ -136,6 +157,78 @@ export default function RepoDetail() {
               Last full sync {formatDate(repo.last_synced_at)}
             </p>
           )}
+
+          {/* Lists */}
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {(repo.lists || []).map((l: any) => (
+              <span
+                key={l.id}
+                className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs border border-ink-700 bg-ink-950/50 text-ink-200"
+              >
+                <span
+                  className="h-1.5 w-1.5 rounded-full"
+                  style={{ backgroundColor: l.color }}
+                />
+                {l.name}
+              </span>
+            ))}
+            <div className="relative">
+              <button
+                type="button"
+                className="btn-ghost !py-0.5 !px-2 text-xs"
+                onClick={() => setListOpen((o) => !o)}
+              >
+                Edit lists
+              </button>
+              {listOpen && (
+                <>
+                  <div
+                    className="fixed inset-0 z-10"
+                    onClick={() => setListOpen(false)}
+                  />
+                  <div className="absolute left-0 top-full mt-1 z-20 w-56 max-h-64 overflow-y-auto rounded-xl border border-ink-700 bg-ink-900 shadow-card p-1">
+                    {allLists.length === 0 ? (
+                      <p className="px-3 py-2 text-xs text-ink-500">
+                        No lists yet.{' '}
+                        <a href="/lists" className="text-amber-400">
+                          Create one
+                        </a>
+                      </p>
+                    ) : (
+                      allLists.map((l: any) => {
+                        const on = (repo.lists || []).some(
+                          (x: any) => x.id === l.id
+                        );
+                        return (
+                          <button
+                            key={l.id}
+                            type="button"
+                            onClick={() => toggleList(l.id)}
+                            className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-sm text-left hover:bg-ink-850"
+                          >
+                            <span
+                              className={`h-3.5 w-3.5 rounded border flex items-center justify-center text-[10px] ${
+                                on
+                                  ? 'bg-amber-400 border-amber-400 text-ink-975'
+                                  : 'border-ink-600'
+                              }`}
+                            >
+                              {on ? '✓' : ''}
+                            </span>
+                            <span
+                              className="h-1.5 w-1.5 rounded-full"
+                              style={{ backgroundColor: l.color }}
+                            />
+                            <span className="truncate text-ink-200">{l.name}</span>
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
         </div>
         <div className="flex flex-wrap gap-2 shrink-0">
           <button

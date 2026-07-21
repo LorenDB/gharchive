@@ -1,6 +1,13 @@
 import Link from 'next/link';
 import { formatRelativeTime } from '@/lib/format';
 
+interface ListBadge {
+  id: number;
+  name: string;
+  color: string;
+  source?: string;
+}
+
 interface Repo {
   id: number;
   platform: 'github' | 'gitlab';
@@ -9,10 +16,13 @@ interface Repo {
   clone_url: string;
   last_synced_at: string | null;
   created_at: string;
+  from_star?: boolean;
+  lists?: ListBadge[];
 }
 
 export default function RepoCard({ repo }: { repo: Repo }) {
   const isGithub = repo.platform === 'github';
+  const lists = repo.lists || [];
 
   return (
     <Link
@@ -46,6 +56,26 @@ export default function RepoCard({ repo }: { repo: Repo }) {
         <span className="text-ink-600 mx-0.5">/</span>
         <span className="font-semibold">{repo.name}</span>
       </h2>
+
+      {lists.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mt-3">
+          {lists.slice(0, 4).map((l) => (
+            <span
+              key={l.id}
+              className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium border border-ink-700/80 bg-ink-950/50 text-ink-300"
+            >
+              <span
+                className="h-1.5 w-1.5 rounded-full"
+                style={{ backgroundColor: l.color }}
+              />
+              {l.name}
+            </span>
+          ))}
+          {lists.length > 4 && (
+            <span className="text-[10px] text-ink-600">+{lists.length - 4}</span>
+          )}
+        </div>
+      )}
 
       <p className="mt-auto pt-5 text-xs text-ink-500 flex items-center gap-1.5">
         <ClockIcon />

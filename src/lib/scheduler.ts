@@ -1,7 +1,17 @@
-import { getDb, getSettings } from '@/lib/db';
+import {
+  getDb,
+  getSettings,
+  getGithubAccount,
+  getGithubToken,
+} from '@/lib/db';
 import { syncRepo } from '@/lib/sync';
+import {
+  scanAndMaybeImportStars,
+  scanAndMaybeImportOwned,
+  getImportStatus,
+} from '@/lib/import-stars';
 
-/** Check due repos every minute; actual cadence is controlled by settings. */
+/** Check due work every minute; cadences come from settings. */
 const TICK_MS = 60_000;
 
 type SchedulerState = {
@@ -9,10 +19,11 @@ type SchedulerState = {
   running: boolean;
   lastRunAt: string | null;
   lastRunSummary: string | null;
+  lastGithubScanAt: string | null;
+  lastGithubScanSummary: string | null;
   started: boolean;
 };
 
-// Survive Next.js module duplication (instrumentation vs route bundles)
 const g = globalThis as typeof globalThis & {
   __gharchiveScheduler?: SchedulerState;
 };
@@ -24,25 +35,27 @@ function state(): SchedulerState {
       running: false,
       lastRunAt: null,
       lastRunSummary: null,
+      lastGithubScanAt: null,
+      lastGithubScanSummary: null,
       started: false,
     };
   }
   return g.__gharchiveScheduler;
 }
 
-function needsSync(
-  lastSyncedAt: string | null,
-  intervalHours: number
-): boolean {
+function parseTime(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const normalized =
+    iso.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(iso) ? iso : iso + 'Z';
+  const t = new Date(normalized).getTime();
+  return Number.isFinite(t) ? t : null;
+}
+
+function isDue(lastAt: string | null | undefined, intervalHours: number): boolean {
   if (intervalHours <= 0) return false;
-  if (!lastSyncedAt) return true;
-  const last = new Date(
-    lastSyncedAt.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(lastSyncedAt)
-      ? lastSyncedAt
-      : lastSyncedAt + 'Z'
-  ).getTime();
-  const due = last + intervalHours * 3600_000;
-  return Date.now() >= due;
+  const last = parseTime(lastAt);
+  if (last == null) return true;
+  return Date.now() >= last + intervalHours * 3600_000;
 }
 
 async function mapPool<T>(
@@ -96,9 +109,7 @@ export async function runScheduledSync(force = false): Promise<{
   const { repos } = getDb();
   const due = force
     ? repos
-    : repos.filter((r) =>
-        needsSync(r.last_synced_at, settings.sync_interval_hours)
-      );
+    : repos.filter((r) => isDue(r.last_synced_at, settings.sync_interval_hours));
 
   if (due.length === 0) {
     return {
@@ -139,6 +150,78 @@ export async function runScheduledSync(force = false): Promise<{
   };
 }
 
+export async function runScheduledGithubScan(force = false): Promise<{
+  ran: boolean;
+  messages: string[];
+}> {
+  const settings = getSettings();
+  const token = getGithubToken();
+  const account = getGithubAccount();
+
+  if (!token || !account) {
+    return { ran: false, messages: ['No linked GitHub account'] };
+  }
+
+  if (getImportStatus().running) {
+    return { ran: false, messages: ['Import already in progress'] };
+  }
+
+  const starsWanted =
+    settings.auto_scan_stars_enabled || settings.auto_import_stars_enabled;
+  const ownedWanted =
+    settings.auto_scan_owned_enabled || settings.auto_import_owned_enabled;
+
+  if (!force && !starsWanted && !ownedWanted) {
+    return { ran: false, messages: ['GitHub auto-scan disabled'] };
+  }
+
+  const interval = settings.github_scan_interval_hours;
+  const messages: string[] = [];
+  let ran = false;
+
+  const starsDue =
+    force ||
+    (starsWanted && isDue(account.last_stars_scan_at, interval));
+  const ownedDue =
+    force ||
+    (ownedWanted && isDue(account.last_owned_scan_at, interval));
+
+  if (starsDue && starsWanted) {
+    try {
+      // Respect auto_import_* settings; force only skips the interval check
+      const result = await scanAndMaybeImportStars();
+      messages.push(result.message);
+      ran = true;
+    } catch (err: any) {
+      messages.push(`stars scan failed: ${err?.message || err}`);
+      ran = true;
+    }
+  }
+
+  if (ownedDue && ownedWanted) {
+    if (getImportStatus().running) {
+      messages.push('owned: skipped (import busy)');
+    } else {
+      try {
+        const result = await scanAndMaybeImportOwned();
+        messages.push(result.message);
+        ran = true;
+      } catch (err: any) {
+        messages.push(`owned scan failed: ${err?.message || err}`);
+        ran = true;
+      }
+    }
+  }
+
+  if (ran) {
+    const s = state();
+    s.lastGithubScanAt = new Date().toISOString();
+    s.lastGithubScanSummary = messages.join('; ');
+  }
+
+  return { ran, messages };
+}
+
 async function tick() {
   try {
     const result = await runScheduledSync(false);
@@ -146,7 +229,16 @@ async function tick() {
       console.log(`[scheduler] ${result.message}`);
     }
   } catch (err: any) {
-    console.error('[scheduler] tick failed:', err?.message || err);
+    console.error('[scheduler] sync tick failed:', err?.message || err);
+  }
+
+  try {
+    const gh = await runScheduledGithubScan(false);
+    if (gh.ran) {
+      console.log(`[scheduler] github: ${gh.messages.join('; ')}`);
+    }
+  } catch (err: any) {
+    console.error('[scheduler] github scan tick failed:', err?.message || err);
   }
 }
 
@@ -155,7 +247,6 @@ export function startScheduler() {
   if (s.started) return;
   s.started = true;
 
-  // Initial check shortly after boot (let the server finish warming up)
   setTimeout(() => {
     tick();
   }, 15_000);
@@ -176,7 +267,14 @@ export function getSchedulerStatus() {
     running: s.running,
     last_run_at: s.lastRunAt,
     last_run_summary: s.lastRunSummary,
+    last_github_scan_at: s.lastGithubScanAt,
+    last_github_scan_summary: s.lastGithubScanSummary,
     auto_sync_enabled: settings.auto_sync_enabled,
     sync_interval_hours: settings.sync_interval_hours,
+    auto_scan_stars_enabled: settings.auto_scan_stars_enabled,
+    auto_import_stars_enabled: settings.auto_import_stars_enabled,
+    auto_scan_owned_enabled: settings.auto_scan_owned_enabled,
+    auto_import_owned_enabled: settings.auto_import_owned_enabled,
+    github_scan_interval_hours: settings.github_scan_interval_hours,
   };
 }

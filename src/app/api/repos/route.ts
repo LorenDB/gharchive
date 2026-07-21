@@ -1,21 +1,46 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, addRepo } from '@/lib/db';
+import {
+  getDb,
+  addRepo,
+  getRepoLists,
+  setRepoLists,
+  getLists,
+} from '@/lib/db';
 import { getMirrorPath, cloneMirror } from '@/lib/git';
 import { parseCloneUrl } from '@/lib/releases';
 import { syncRepo } from '@/lib/sync';
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   const { repos } = getDb();
+  const listIdParam = req.nextUrl.searchParams.get('list_id');
+  const listId = listIdParam ? parseInt(listIdParam, 10) : null;
+
+  let filtered = repos;
+  if (listId && !isNaN(listId)) {
+    filtered = repos.filter((r) =>
+      getRepoLists(r.id).some((l) => l.id === listId)
+    );
+  }
+
   return NextResponse.json(
-    repos
-      .map(({ clone_url, mirror_path, ...rest }) => rest)
+    filtered
+      .map(({ clone_url, mirror_path, ...rest }) => ({
+        ...rest,
+        lists: getRepoLists(rest.id).map((l) => ({
+          id: l.id,
+          name: l.name,
+          color: l.color,
+          source: l.source,
+        })),
+      }))
       .sort((a, b) => b.id - a.id)
   );
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const { clone_url } = await req.json();
+    const body = await req.json();
+    const { clone_url } = body;
     if (!clone_url || typeof clone_url !== 'string') {
       return NextResponse.json({ error: 'clone_url is required' }, { status: 400 });
     }
@@ -41,18 +66,29 @@ export async function POST(req: NextRequest) {
       last_synced_at: null,
     });
 
-    // Immediately sync releases (git is already fully cloned)
+    // Optional list assignment on create
+    if (Array.isArray(body.list_ids) && body.list_ids.length) {
+      const valid = new Set(getLists().map((l) => l.id));
+      setRepoLists(
+        newRepo.id,
+        body.list_ids
+          .map((n: any) => parseInt(n, 10))
+          .filter((id: number) => valid.has(id))
+      );
+    }
+
     try {
       await syncRepo(newRepo, { skipGit: true });
     } catch (syncErr: any) {
-      // Repo is still usable; release sync can be retried manually
       console.error('Initial sync after add failed:', syncErr?.message);
     }
 
-    // Re-read so last_synced_at is current
     const fresh = getDb().repos.find((r) => r.id === newRepo.id) || newRepo;
     const { mirror_path, clone_url: _, ...safe } = fresh;
-    return NextResponse.json(safe, { status: 201 });
+    return NextResponse.json(
+      { ...safe, lists: getRepoLists(fresh.id) },
+      { status: 201 }
+    );
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 400 });
   }

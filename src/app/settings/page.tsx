@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import Link from 'next/link';
 import { formatDate } from '@/lib/format';
 
 interface Settings {
@@ -9,6 +10,13 @@ interface Settings {
   download_release_assets: boolean;
   max_asset_size_mb: number;
   concurrent_syncs: number;
+  auto_scan_stars_enabled: boolean;
+  auto_import_stars_enabled: boolean;
+  auto_scan_owned_enabled: boolean;
+  auto_import_owned_enabled: boolean;
+  github_scan_interval_hours: number;
+  auto_import_owned_include_forks: boolean;
+  auto_import_owned_include_private: boolean;
 }
 
 interface SchedulerStatus {
@@ -16,6 +24,8 @@ interface SchedulerStatus {
   running: boolean;
   last_run_at: string | null;
   last_run_summary: string | null;
+  last_github_scan_at: string | null;
+  last_github_scan_summary: string | null;
   auto_sync_enabled: boolean;
   sync_interval_hours: number;
 }
@@ -40,21 +50,79 @@ export default function SettingsPage() {
   const [message, setMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(
     null
   );
+  const [ghAccount, setGhAccount] = useState<{
+    username: string;
+    linked_at: string;
+    last_stars_import_at: string | null;
+    last_stars_scan_at: string | null;
+    last_owned_scan_at: string | null;
+    last_owned_import_at: string | null;
+  } | null>(null);
+  const [ghToken, setGhToken] = useState('');
+  const [ghBusy, setGhBusy] = useState(false);
+  const [scanBusy, setScanBusy] = useState<'stars' | 'owned' | 'both' | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch('/api/settings');
+      const [res, ghRes] = await Promise.all([
+        fetch('/api/settings'),
+        fetch('/api/github'),
+      ]);
       const data = await res.json();
       setSettings(data.settings);
       setDraft(data.settings);
       setIntervals(data.interval_options || [1, 6, 12, 24, 48, 168]);
       setScheduler(data.scheduler);
+      if (ghRes.ok) {
+        const gh = await ghRes.json();
+        setGhAccount(gh.account);
+      }
     } catch {
       setMessage({ type: 'err', text: 'Failed to load settings' });
     } finally {
       setLoading(false);
     }
   }, []);
+
+  async function linkGithub(e: React.FormEvent) {
+    e.preventDefault();
+    setGhBusy(true);
+    setMessage(null);
+    try {
+      const res = await fetch('/api/github', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: ghToken }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to link');
+      setGhAccount(data.account);
+      setGhToken('');
+      setMessage({
+        type: 'ok',
+        text: `Linked GitHub as @${data.account.username}`,
+      });
+    } catch (err: any) {
+      setMessage({ type: 'err', text: err.message });
+    } finally {
+      setGhBusy(false);
+    }
+  }
+
+  async function unlinkGithub() {
+    if (!confirm('Unlink GitHub account? The token will be removed from local storage.'))
+      return;
+    setGhBusy(true);
+    try {
+      await fetch('/api/github', { method: 'DELETE' });
+      setGhAccount(null);
+      setMessage({ type: 'ok', text: 'GitHub account unlinked' });
+    } catch (err: any) {
+      setMessage({ type: 'err', text: err.message });
+    } finally {
+      setGhBusy(false);
+    }
+  }
 
   useEffect(() => {
     load();
@@ -95,19 +163,78 @@ export default function SettingsPage() {
       const res = await fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ force: true }),
+        body: JSON.stringify({ force: true, sync: true }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Sync failed');
       setScheduler(data.scheduler);
+      const sync = data.sync;
       setMessage({
         type: 'ok',
-        text: data.message || `Synced ${data.synced} repositories`,
+        text: sync?.message || 'Sync finished',
       });
     } catch (err: any) {
       setMessage({ type: 'err', text: err.message });
     } finally {
       setRunningAll(false);
+    }
+  }
+
+  async function runGithubScan(kind: 'stars' | 'owned' | 'both') {
+    setScanBusy(kind);
+    setMessage(null);
+    try {
+      if (kind === 'both') {
+        const res = await fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ force: true, sync: false, github_scan: true }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Scan failed');
+        setScheduler(data.scheduler);
+        const msgs = data.github?.messages?.join('; ') || 'Scan finished';
+        setMessage({ type: 'ok', text: msgs });
+      } else if (kind === 'stars') {
+        const res = await fetch('/api/github/import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            scan: true,
+            force_import: draft?.auto_import_stars_enabled ?? false,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Stars scan failed');
+        setMessage({ type: 'ok', text: data.result?.message || 'Stars scan done' });
+      } else {
+        const res = await fetch('/api/github/owned', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            scan: true,
+            force_import: draft?.auto_import_owned_enabled ?? false,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Owned scan failed');
+        setMessage({ type: 'ok', text: data.result?.message || 'Owned scan done' });
+      }
+      // refresh account timestamps
+      const ghRes = await fetch('/api/github');
+      if (ghRes.ok) {
+        const gh = await ghRes.json();
+        setGhAccount(gh.account);
+      }
+      const setRes = await fetch('/api/settings');
+      if (setRes.ok) {
+        const s = await setRes.json();
+        setScheduler(s.scheduler);
+      }
+    } catch (err: any) {
+      setMessage({ type: 'err', text: err.message });
+    } finally {
+      setScanBusy(null);
     }
   }
 
@@ -141,6 +268,303 @@ export default function SettingsPage() {
       )}
 
       <div className="space-y-6">
+        {/* GitHub account */}
+        <section className="surface p-5 sm:p-6">
+          <h2 className="text-base font-semibold text-white mb-1">GitHub account</h2>
+          <p className="hint !mt-0 mb-5">
+            Link a personal access token to import starred repositories and star lists.
+            Token is stored only in local <span className="font-mono">data/db.json</span>.
+            Needs classic PAT with <span className="font-mono">read:user</span> for
+            stars; add <span className="font-mono">repo</span> to include private
+            owned repositories.{' '}
+            <a
+              href="https://github.com/settings/tokens/new?description=GHArchive&scopes=read:user,repo"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-amber-400 hover:text-amber-300 underline underline-offset-2"
+            >
+              Create a classic PAT on GitHub ↗
+            </a>
+          </p>
+
+          {ghAccount ? (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="badge-mint">@{ghAccount.username}</span>
+                <span className="text-xs text-ink-500">
+                  Linked {formatDate(ghAccount.linked_at)}
+                </span>
+              </div>
+              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-ink-500">
+                <div>
+                  Stars scan:{' '}
+                  {ghAccount.last_stars_scan_at
+                    ? formatDate(ghAccount.last_stars_scan_at)
+                    : 'never'}
+                </div>
+                <div>
+                  Owned scan:{' '}
+                  {ghAccount.last_owned_scan_at
+                    ? formatDate(ghAccount.last_owned_scan_at)
+                    : 'never'}
+                </div>
+              </dl>
+              <div className="flex flex-wrap gap-2">
+                <Link href="/import" className="btn-primary">
+                  Import stars
+                </Link>
+                <button
+                  type="button"
+                  className="btn-danger"
+                  onClick={unlinkGithub}
+                  disabled={ghBusy}
+                >
+                  Unlink
+                </button>
+              </div>
+            </div>
+          ) : (
+            <form onSubmit={linkGithub} className="space-y-3">
+              <div>
+                <label className="label" htmlFor="gh-token">
+                  Personal access token
+                </label>
+                <input
+                  id="gh-token"
+                  type="password"
+                  className="input font-mono text-[13px]"
+                  value={ghToken}
+                  onChange={(e) => setGhToken(e.target.value)}
+                  placeholder="ghp_… or github_pat_…"
+                  autoComplete="off"
+                />
+              </div>
+              <button
+                type="submit"
+                className="btn-primary"
+                disabled={ghBusy || !ghToken.trim()}
+              >
+                {ghBusy ? (
+                  <>
+                    <Spinner /> Linking…
+                  </>
+                ) : (
+                  'Link account'
+                )}
+              </button>
+            </form>
+          )}
+        </section>
+
+        {/* GitHub auto-scan / import */}
+        <section className="surface p-5 sm:p-6">
+          <h2 className="text-base font-semibold text-white mb-1">
+            GitHub auto-discovery
+          </h2>
+          <p className="hint !mt-0 mb-5">
+            Periodically scan the linked account for new stars and owned repositories.
+            Enable auto-import to mirror anything not yet archived. Requires a linked
+            GitHub token.
+          </p>
+
+          <div
+            className={`space-y-5 ${!ghAccount ? 'opacity-40 pointer-events-none' : ''}`}
+          >
+            <div>
+              <label className="label">Scan frequency</label>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {intervals.map((h) => {
+                  const selected = draft.github_scan_interval_hours === h;
+                  return (
+                    <button
+                      key={h}
+                      type="button"
+                      onClick={() =>
+                        setDraft({ ...draft, github_scan_interval_hours: h })
+                      }
+                      className={`rounded-lg border px-3 py-2.5 text-left text-sm transition-all ${
+                        selected
+                          ? 'border-amber-400/50 bg-amber-400/10 text-amber-300 shadow-glow'
+                          : 'border-ink-700 bg-ink-950/50 text-ink-300 hover:border-ink-600'
+                      }`}
+                    >
+                      <span className="block font-medium">
+                        {INTERVAL_LABELS[h] || `Every ${h}h`}
+                      </span>
+                      <span className="block text-[11px] text-ink-500 mt-0.5 font-mono">
+                        {h}h
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-ink-800 bg-ink-950/40 p-4 space-y-4">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-sm font-medium text-ink-100">Scan starred repos</p>
+                  <p className="hint !mt-1">
+                    Refresh star lists and detect newly starred repositories.
+                  </p>
+                </div>
+                <Toggle
+                  checked={draft.auto_scan_stars_enabled}
+                  onChange={(v) =>
+                    setDraft({
+                      ...draft,
+                      auto_scan_stars_enabled: v,
+                      ...(v ? {} : { auto_import_stars_enabled: false }),
+                    })
+                  }
+                  label="Scan stars"
+                />
+              </div>
+              <div className="flex items-start justify-between gap-4 pl-0 sm:pl-2">
+                <div>
+                  <p className="text-sm font-medium text-ink-200">Auto-import new stars</p>
+                  <p className="hint !mt-1">
+                    Clone and archive stars that are not already in the vault. Also
+                    updates list membership for existing mirrors.
+                  </p>
+                </div>
+                <Toggle
+                  checked={draft.auto_import_stars_enabled}
+                  onChange={(v) =>
+                    setDraft({
+                      ...draft,
+                      auto_import_stars_enabled: v,
+                      ...(v ? { auto_scan_stars_enabled: true } : {}),
+                    })
+                  }
+                  label="Auto-import stars"
+                />
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-ink-800 bg-ink-950/40 p-4 space-y-4">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-sm font-medium text-ink-100">Scan owned repos</p>
+                  <p className="hint !mt-1">
+                    Discover repositories owned by @{ghAccount?.username || 'you'}{' '}
+                    (affiliation=owner).
+                  </p>
+                </div>
+                <Toggle
+                  checked={draft.auto_scan_owned_enabled}
+                  onChange={(v) =>
+                    setDraft({
+                      ...draft,
+                      auto_scan_owned_enabled: v,
+                      ...(v ? {} : { auto_import_owned_enabled: false }),
+                    })
+                  }
+                  label="Scan owned"
+                />
+              </div>
+              <div className="flex items-start justify-between gap-4 pl-0 sm:pl-2">
+                <div>
+                  <p className="text-sm font-medium text-ink-200">Auto-import owned</p>
+                  <p className="hint !mt-1">
+                    Mirror owned repos not yet archived. Tagged with an{' '}
+                    <span className="font-mono">Owned</span> list.
+                  </p>
+                </div>
+                <Toggle
+                  checked={draft.auto_import_owned_enabled}
+                  onChange={(v) =>
+                    setDraft({
+                      ...draft,
+                      auto_import_owned_enabled: v,
+                      ...(v ? { auto_scan_owned_enabled: true } : {}),
+                    })
+                  }
+                  label="Auto-import owned"
+                />
+              </div>
+              <div className="flex flex-col sm:flex-row gap-4 pt-1 border-t border-ink-800/80">
+                <label className="flex items-center gap-2 text-sm text-ink-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="rounded border-ink-600 bg-ink-950 text-amber-400"
+                    checked={draft.auto_import_owned_include_forks}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        auto_import_owned_include_forks: e.target.checked,
+                      })
+                    }
+                  />
+                  Include forks
+                </label>
+                <label className="flex items-center gap-2 text-sm text-ink-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="rounded border-ink-600 bg-ink-950 text-amber-400"
+                    checked={draft.auto_import_owned_include_private}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        auto_import_owned_include_private: e.target.checked,
+                      })
+                    }
+                  />
+                  Include private
+                </label>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2 pt-1">
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={!ghAccount || scanBusy !== null}
+                onClick={() => runGithubScan('stars')}
+              >
+                {scanBusy === 'stars' ? (
+                  <>
+                    <Spinner /> Scanning stars…
+                  </>
+                ) : (
+                  'Scan stars now'
+                )}
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={!ghAccount || scanBusy !== null}
+                onClick={() => runGithubScan('owned')}
+              >
+                {scanBusy === 'owned' ? (
+                  <>
+                    <Spinner /> Scanning owned…
+                  </>
+                ) : (
+                  'Scan owned now'
+                )}
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={!ghAccount || scanBusy !== null}
+                onClick={() => runGithubScan('both')}
+              >
+                {scanBusy === 'both' ? (
+                  <>
+                    <Spinner /> Scanning…
+                  </>
+                ) : (
+                  'Scan all now'
+                )}
+              </button>
+            </div>
+            {!ghAccount && (
+              <p className="hint">Link a GitHub account above to enable discovery.</p>
+            )}
+          </div>
+        </section>
+
         {/* Auto-sync */}
         <section className="surface p-5 sm:p-6">
           <div className="flex items-start justify-between gap-4 mb-5">
@@ -314,6 +738,26 @@ export default function SettingsPage() {
               value={
                 <span className="text-ink-400 text-xs">
                   {scheduler?.last_run_summary || '—'}
+                </span>
+              }
+            />
+            <StatusRow
+              label="Last GitHub scan"
+              value={
+                scheduler?.last_github_scan_at ? (
+                  <span className="font-mono text-xs">
+                    {formatDate(scheduler.last_github_scan_at)}
+                  </span>
+                ) : (
+                  <span className="text-ink-500">never</span>
+                )
+              }
+            />
+            <StatusRow
+              label="GitHub scan result"
+              value={
+                <span className="text-ink-400 text-xs">
+                  {scheduler?.last_github_scan_summary || '—'}
                 </span>
               }
             />

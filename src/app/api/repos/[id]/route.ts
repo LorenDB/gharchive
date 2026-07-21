@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, deleteRepo } from '@/lib/db';
+import { getDb, deleteRepo, getRepoLists, getLists } from '@/lib/db';
 import { deleteMirror, mirrorStat } from '@/lib/git';
 
 export async function GET(
@@ -30,7 +30,9 @@ export async function GET(
       branch_count: stats.branchCount,
       tag_count: stats.tagCount,
       size_bytes: stats.sizeBytes,
+      lists: getRepoLists(repo.id),
     },
+    allLists: getLists(),
     syncLogs: repoLogs,
   });
 }

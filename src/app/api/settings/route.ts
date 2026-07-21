@@ -8,13 +8,24 @@ import {
 import {
   getSchedulerStatus,
   runScheduledSync,
+  runScheduledGithubScan,
   startScheduler,
 } from '@/lib/scheduler';
 
 const INTERVAL_OPTIONS = [1, 6, 12, 24, 48, 168] as const;
 
-// Fallback if instrumentation didn't run (e.g. some deploy setups)
 startScheduler();
+
+function parseHours(
+  value: unknown,
+  field: string
+): number | { error: string } {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 1 || n > 24 * 30) {
+    return { error: `${field} must be between 1 and 720` };
+  }
+  return Math.round(n);
+}
 
 export async function GET() {
   return NextResponse.json({
@@ -35,14 +46,11 @@ export async function PUT(req: NextRequest) {
     }
 
     if (body.sync_interval_hours !== undefined) {
-      const n = Number(body.sync_interval_hours);
-      if (!Number.isFinite(n) || n < 1 || n > 24 * 30) {
-        return NextResponse.json(
-          { error: 'sync_interval_hours must be between 1 and 720' },
-          { status: 400 }
-        );
+      const n = parseHours(body.sync_interval_hours, 'sync_interval_hours');
+      if (typeof n === 'object') {
+        return NextResponse.json(n, { status: 400 });
       }
-      patch.sync_interval_hours = Math.round(n);
+      patch.sync_interval_hours = n;
     }
 
     if (typeof body.download_release_assets === 'boolean') {
@@ -71,6 +79,39 @@ export async function PUT(req: NextRequest) {
       patch.concurrent_syncs = Math.round(n);
     }
 
+    // GitHub scan / auto-import
+    for (const key of [
+      'auto_scan_stars_enabled',
+      'auto_import_stars_enabled',
+      'auto_scan_owned_enabled',
+      'auto_import_owned_enabled',
+      'auto_import_owned_include_forks',
+      'auto_import_owned_include_private',
+    ] as const) {
+      if (typeof body[key] === 'boolean') {
+        patch[key] = body[key];
+      }
+    }
+
+    // Enabling auto-import implies scanning
+    if (patch.auto_import_stars_enabled === true) {
+      patch.auto_scan_stars_enabled = true;
+    }
+    if (patch.auto_import_owned_enabled === true) {
+      patch.auto_scan_owned_enabled = true;
+    }
+
+    if (body.github_scan_interval_hours !== undefined) {
+      const n = parseHours(
+        body.github_scan_interval_hours,
+        'github_scan_interval_hours'
+      );
+      if (typeof n === 'object') {
+        return NextResponse.json(n, { status: 400 });
+      }
+      patch.github_scan_interval_hours = n;
+    }
+
     const settings = updateSettings(patch);
     return NextResponse.json({
       settings,
@@ -81,12 +122,27 @@ export async function PUT(req: NextRequest) {
   }
 }
 
-/** Trigger an immediate scheduled pass (all due repos, or all if force). */
+/**
+ * Trigger work immediately.
+ * Body: { force?: boolean, github_scan?: boolean, sync?: boolean }
+ * Defaults: sync only (force). Set github_scan:true to run star/owned scan.
+ */
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
     const force = Boolean(body?.force);
-    const result = await runScheduledSync(force);
+    const doSync = body?.sync !== false;
+    const doGithub = Boolean(body?.github_scan);
+
+    const result: Record<string, unknown> = {};
+
+    if (doSync) {
+      result.sync = await runScheduledSync(force);
+    }
+    if (doGithub) {
+      result.github = await runScheduledGithubScan(force);
+    }
+
     return NextResponse.json({
       ...result,
       scheduler: getSchedulerStatus(),

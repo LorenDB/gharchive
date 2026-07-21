@@ -74,7 +74,9 @@ export async function fetchReleases(
 
 async function fetchGitHubReleases(repoPath: string): Promise<ReleaseData[]> {
   const url = `https://api.github.com/repos/${repoPath}/releases?per_page=100`;
-  const token = process.env.GITHUB_TOKEN;
+  // Lazy import to avoid circular deps at module init
+  const { getGithubToken } = await import('@/lib/db');
+  const token = getGithubToken();
   const headers: Record<string, string> = {
     Accept: 'application/vnd.github+json',
     'User-Agent': 'gharchive',
