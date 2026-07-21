@@ -29,6 +29,7 @@ interface Settings {
   alert_releases_wiped: boolean;
   alert_history_wiped: boolean;
   alert_repo_deleted: boolean;
+  alert_repo_archived: boolean;
   alert_sync_failed: boolean;
   alert_storage_low: boolean;
   alert_memory_low: boolean;
@@ -96,6 +97,12 @@ const ALERT_CATEGORY_ROWS: {
     key: 'alert_repo_deleted',
     label: 'Repo deleted',
     description: 'Remote repository is gone or inaccessible (404 / not found).',
+    group: 'archive',
+  },
+  {
+    key: 'alert_repo_archived',
+    label: 'Repo archived',
+    description: 'Remote repository was marked as archived on GitHub/GitLab.',
     group: 'archive',
   },
   {

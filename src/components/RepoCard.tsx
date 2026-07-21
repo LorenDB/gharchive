@@ -18,27 +18,48 @@ interface Repo {
   created_at: string;
   from_star?: boolean;
   lists?: ListBadge[];
+  remote_description?: string | null;
+  local_description?: string | null;
+  language?: string | null;
+  topics?: string[];
+  stargazers_count?: number | null;
+  is_archived?: boolean;
+  is_private?: boolean;
+  is_fork?: boolean;
 }
 
 export default function RepoCard({ repo }: { repo: Repo }) {
   const isGithub = repo.platform === 'github';
   const lists = repo.lists || [];
+  const blurb = repo.local_description || repo.remote_description;
 
   return (
     <Link
       href={`/repos/${repo.id}`}
-      className="group surface relative flex flex-col p-5 transition-all duration-200 hover:border-ink-600 hover:bg-ink-900 hover:-translate-y-0.5 hover:shadow-glow"
+      className={`group surface relative flex flex-col p-5 transition-all duration-200 hover:border-ink-600 hover:bg-ink-900 hover:-translate-y-0.5 hover:shadow-glow ${
+        repo.is_archived ? 'border-amber-500/20' : ''
+      }`}
     >
       <div className="flex items-start justify-between gap-3 mb-4">
-        <span
-          className={`badge ${
-            isGithub
-              ? 'bg-ink-850 text-ink-200 border border-ink-700'
-              : 'bg-orange-500/10 text-orange-300 border border-orange-500/25'
-          }`}
-        >
-          {isGithub ? 'GitHub' : 'GitLab'}
-        </span>
+        <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+          <span
+            className={`badge ${
+              isGithub
+                ? 'bg-ink-850 text-ink-200 border border-ink-700'
+                : 'bg-orange-500/10 text-orange-300 border border-orange-500/25'
+            }`}
+          >
+            {isGithub ? 'GitHub' : 'GitLab'}
+          </span>
+          {repo.is_archived && (
+            <span
+              className="badge bg-amber-500/10 text-amber-300 border border-amber-500/30"
+              title="Marked as archived on the remote"
+            >
+              archived
+            </span>
+          )}
+        </div>
         <span
           className={`h-2 w-2 rounded-full mt-1.5 shrink-0 ${
             repo.last_synced_at
@@ -49,13 +70,42 @@ export default function RepoCard({ repo }: { repo: Repo }) {
         />
       </div>
 
-      <h2 className="font-mono text-[15px] text-white group-hover:text-amber-300 transition-colors leading-snug">
+      <h2
+        className={`font-mono text-[15px] group-hover:text-amber-300 transition-colors leading-snug ${
+          repo.is_archived ? 'text-ink-300' : 'text-white'
+        }`}
+      >
         <span className="text-ink-400 group-hover:text-amber-400/70">
           {repo.owner}
         </span>
         <span className="text-ink-600 mx-0.5">/</span>
         <span className="font-semibold">{repo.name}</span>
       </h2>
+
+      {blurb && (
+        <p className="mt-2 text-xs text-ink-400 line-clamp-2 leading-relaxed">
+          {blurb}
+        </p>
+      )}
+
+      {(repo.language || (repo.topics && repo.topics.length > 0)) && (
+        <div className="flex flex-wrap items-center gap-1.5 mt-2.5">
+          {repo.language && (
+            <span className="inline-flex items-center gap-1 text-[10px] text-ink-500">
+              <span className="h-1.5 w-1.5 rounded-full bg-mint-400" />
+              {repo.language}
+            </span>
+          )}
+          {(repo.topics || []).slice(0, 3).map((t) => (
+            <span
+              key={t}
+              className="rounded-full px-1.5 py-0.5 text-[10px] border border-ink-700/80 text-ink-500"
+            >
+              {t}
+            </span>
+          ))}
+        </div>
+      )}
 
       {lists.length > 0 && (
         <div className="flex flex-wrap gap-1.5 mt-3">

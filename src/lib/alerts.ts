@@ -10,6 +10,7 @@ export const ALERT_CATEGORIES = [
   'releases_wiped',
   'history_wiped',
   'repo_deleted',
+  'repo_archived',
   'sync_failed',
   'storage_low',
   'memory_low',
@@ -45,6 +46,12 @@ export const ALERT_CATEGORY_META: Record<
     severity: 'failure',
     settingKey: 'alert_repo_deleted',
   },
+  repo_archived: {
+    label: 'Repo archived',
+    description: 'The remote repository was marked as archived on GitHub/GitLab.',
+    severity: 'warning',
+    settingKey: 'alert_repo_archived',
+  },
   sync_failed: {
     label: 'Sync failed',
     description: 'A repository sync failed for a non-deletion reason.',
@@ -70,6 +77,7 @@ type AlertSettingKey =
   | 'alert_releases_wiped'
   | 'alert_history_wiped'
   | 'alert_repo_deleted'
+  | 'alert_repo_archived'
   | 'alert_sync_failed'
   | 'alert_storage_low'
   | 'alert_memory_low';
@@ -92,6 +100,7 @@ const DEFAULT_COOLDOWN_MS: Record<AlertCategory, number> = {
   releases_wiped: 6 * 3600_000,
   history_wiped: 6 * 3600_000,
   repo_deleted: 24 * 3600_000,
+  repo_archived: 24 * 3600_000,
   sync_failed: 2 * 3600_000,
   storage_low: 6 * 3600_000,
   memory_low: 2 * 3600_000,

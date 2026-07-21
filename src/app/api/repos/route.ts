@@ -27,7 +27,22 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(
       filtered
         .map(({ clone_url, mirror_path, ...rest }) => ({
-          ...rest,
+          id: rest.id,
+          platform: rest.platform,
+          owner: rest.owner,
+          name: rest.name,
+          last_synced_at: rest.last_synced_at,
+          created_at: rest.created_at,
+          from_star: rest.from_star,
+          from_owned: rest.from_owned,
+          remote_description: rest.remote_description ?? null,
+          local_description: rest.local_description ?? null,
+          language: rest.language ?? null,
+          topics: rest.topics ?? [],
+          stargazers_count: rest.stargazers_count ?? null,
+          is_archived: Boolean(rest.is_archived),
+          is_private: Boolean(rest.is_private),
+          is_fork: Boolean(rest.is_fork),
           lists: getRepoLists(rest.id).map((l) => ({
             id: l.id,
             name: l.name,

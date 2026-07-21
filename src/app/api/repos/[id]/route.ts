@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, deleteRepo, getRepoLists, getLists } from '@/lib/db';
+import {
+  getDb,
+  deleteRepo,
+  getRepoLists,
+  getLists,
+  updateRepo,
+  getRepoById,
+} from '@/lib/db';
 import { deleteMirror, mirrorStat } from '@/lib/git';
 import { withApiUser } from '@/lib/api-auth';
 
@@ -36,6 +43,66 @@ export async function GET(
       },
       allLists: getLists(),
       syncLogs: repoLogs,
+    });
+  });
+}
+
+/** Update user-editable fields (currently local_description). */
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  return withApiUser(async () => {
+    const id = parseInt(params.id, 10);
+    if (isNaN(id)) {
+      return NextResponse.json({ error: 'Invalid id' }, { status: 400 });
+    }
+
+    const repo = getRepoById(id);
+    if (!repo) {
+      return NextResponse.json({ error: 'Not found' }, { status: 404 });
+    }
+
+    let body: any;
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
+    }
+
+    if (!('local_description' in body)) {
+      return NextResponse.json(
+        { error: 'No updatable fields provided' },
+        { status: 400 }
+      );
+    }
+
+    let local_description: string | null = null;
+    if (body.local_description != null) {
+      if (typeof body.local_description !== 'string') {
+        return NextResponse.json(
+          { error: 'local_description must be a string' },
+          { status: 400 }
+        );
+      }
+      const trimmed = body.local_description.trim();
+      if (trimmed.length > 10000) {
+        return NextResponse.json(
+          { error: 'local_description max length is 10000 characters' },
+          { status: 400 }
+        );
+      }
+      local_description = trimmed || null;
+    }
+
+    updateRepo(id, { local_description });
+    const updated = getRepoById(id)!;
+
+    return NextResponse.json({
+      repo: {
+        ...updated,
+        lists: getRepoLists(updated.id),
+      },
     });
   });
 }

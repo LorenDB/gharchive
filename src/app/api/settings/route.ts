@@ -30,6 +30,7 @@ const ALERT_BOOL_KEYS = [
   'alert_releases_wiped',
   'alert_history_wiped',
   'alert_repo_deleted',
+  'alert_repo_archived',
   'alert_sync_failed',
   'alert_storage_low',
   'alert_memory_low',

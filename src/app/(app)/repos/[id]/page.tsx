@@ -4,9 +4,11 @@ import { useState, useEffect, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import RepoTree from '@/components/RepoTree';
 import ReleasesViewer from '@/components/ReleasesViewer';
+import ReadmePanel from '@/components/ReadmePanel';
+import LocalDescriptionEditor from '@/components/LocalDescriptionEditor';
 import { formatBytes, formatDate, formatRelativeTime } from '@/lib/format';
 
-type Tab = 'code' | 'releases' | 'activity';
+type Tab = 'overview' | 'code' | 'releases' | 'activity';
 
 export default function RepoDetail() {
   const { id } = useParams<{ id: string }>();
@@ -17,7 +19,7 @@ export default function RepoDetail() {
   const [syncLogs, setSyncLogs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
-  const [tab, setTab] = useState<Tab>('code');
+  const [tab, setTab] = useState<Tab>('overview');
   const [syncError, setSyncError] = useState('');
   const [listOpen, setListOpen] = useState(false);
 
@@ -109,8 +111,14 @@ export default function RepoDetail() {
   }
 
   const isGithub = repo.platform === 'github';
+  const topics: string[] = Array.isArray(repo.topics) ? repo.topics : [];
+  const remoteHtml =
+    isGithub
+      ? `https://github.com/${repo.owner}/${repo.name}`
+      : `https://gitlab.com/${repo.owner}/${repo.name}`;
 
   const tabs: { id: Tab; label: string; count?: number }[] = [
+    { id: 'overview', label: 'Overview' },
     { id: 'code', label: 'Code' },
     { id: 'releases', label: 'Releases', count: releases.length },
     { id: 'activity', label: 'Activity', count: syncLogs.length },
@@ -125,7 +133,7 @@ export default function RepoDetail() {
         ← Library
       </button>
 
-      <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-5 mb-8">
+      <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-5 mb-6">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2 mb-2">
             <span
@@ -137,24 +145,111 @@ export default function RepoDetail() {
             >
               {isGithub ? 'GitHub' : 'GitLab'}
             </span>
+            {repo.is_private && (
+              <span className="badge-muted">private</span>
+            )}
+            {repo.is_fork && <span className="badge-muted">fork</span>}
+            {repo.is_archived && (
+              <span
+                className="badge bg-amber-500/10 text-amber-300 border border-amber-500/30"
+                title="This repository is marked as archived on the remote host"
+              >
+                archived upstream
+              </span>
+            )}
             {repo.last_synced_at && (
               <span className="badge-mint">
                 synced {formatRelativeTime(repo.last_synced_at)}
               </span>
             )}
             {repo.from_star && <span className="badge-amber">from star</span>}
+            {repo.from_owned && (
+              <span className="badge-amber">owned</span>
+            )}
           </div>
           <h1 className="text-2xl font-semibold tracking-tight font-mono text-white break-all">
             <span className="text-ink-400">{repo.owner}</span>
             <span className="text-ink-600">/</span>
             {repo.name}
           </h1>
+
+          {repo.remote_description && (
+            <p className="text-sm text-ink-300 mt-2 leading-relaxed max-w-2xl">
+              {repo.remote_description}
+            </p>
+          )}
+
+          {topics.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {topics.map((t) => (
+                <span
+                  key={t}
+                  className="inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium border border-amber-400/20 bg-amber-400/5 text-amber-200/90"
+                >
+                  {t}
+                </span>
+              ))}
+            </div>
+          )}
+
+          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-ink-500">
+            {repo.language && (
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-full bg-mint-400" />
+                {repo.language}
+              </span>
+            )}
+            {repo.stargazers_count != null && (
+              <span className="inline-flex items-center gap-1 font-mono">
+                <StarIcon />
+                {formatCount(repo.stargazers_count)}
+              </span>
+            )}
+            {repo.forks_count != null && (
+              <span className="inline-flex items-center gap-1 font-mono">
+                <ForkIcon />
+                {formatCount(repo.forks_count)}
+              </span>
+            )}
+            {repo.license && (
+              <span className="font-mono">{repo.license}</span>
+            )}
+            {repo.homepage && (
+              <a
+                href={
+                  repo.homepage.startsWith('http')
+                    ? repo.homepage
+                    : `https://${repo.homepage}`
+                }
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-amber-400/90 hover:text-amber-300 truncate max-w-[16rem]"
+              >
+                {stripUrl(repo.homepage)}
+              </a>
+            )}
+            <a
+              href={remoteHtml}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-ink-400 hover:text-ink-200"
+            >
+              View on {isGithub ? 'GitHub' : 'GitLab'} ↗
+            </a>
+          </div>
+
           <p className="text-sm text-ink-500 mt-2 font-mono break-all">
             {repo.clone_url}
           </p>
           {repo.last_synced_at && (
             <p className="text-xs text-ink-600 mt-2">
               Last full sync {formatDate(repo.last_synced_at)}
+              {repo.remote_meta_synced_at && (
+                <>
+                  {' '}
+                  · remote meta {formatRelativeTime(repo.remote_meta_synced_at)}
+                </>
+              )}
             </p>
           )}
 
@@ -258,7 +353,21 @@ export default function RepoDetail() {
         </div>
       )}
 
-      <div className="grid gap-3 grid-cols-2 lg:grid-cols-4 mb-8">
+      {repo.is_archived && (
+        <div className="mb-6 rounded-lg border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-200/90 flex items-start gap-2.5">
+          <ArchiveIcon />
+          <div>
+            <p className="font-medium text-amber-200">Archived upstream</p>
+            <p className="text-amber-200/70 mt-0.5 leading-relaxed">
+              This repository is marked as archived on{' '}
+              {isGithub ? 'GitHub' : 'GitLab'}. The local mirror and releases
+              are still kept; new commits or releases from upstream are unlikely.
+            </p>
+          </div>
+        </div>
+      )}
+
+      <div className="grid gap-3 grid-cols-2 lg:grid-cols-4 mb-6">
         <Stat label="Branches" value={repo.branch_count ?? '—'} />
         <Stat label="Tags" value={repo.tag_count ?? '—'} />
         <Stat label="Releases" value={releases.length} />
@@ -268,8 +377,18 @@ export default function RepoDetail() {
         />
       </div>
 
+      <div className="mb-6">
+        <LocalDescriptionEditor
+          repoId={String(id)}
+          value={repo.local_description}
+          onSaved={(next) =>
+            setRepo((r: any) => (r ? { ...r, local_description: next } : r))
+          }
+        />
+      </div>
+
       <div className="border-b border-ink-800 mb-5">
-        <nav className="flex gap-1 -mb-px overflow-x-auto">
+        <nav className="flex items-center gap-1 -mb-px overflow-x-auto">
           {tabs.map((t) => {
             const active = tab === t.id;
             return (
@@ -278,10 +397,10 @@ export default function RepoDetail() {
                 onClick={() => setTab(t.id)}
                 className={active ? 'tab-btn-active' : 'tab-btn-idle'}
               >
-                {t.label}
+                <span className="leading-none">{t.label}</span>
                 {typeof t.count === 'number' && (
                   <span
-                    className={`ml-2 inline-flex min-w-[1.25rem] justify-center rounded-full px-1.5 py-0.5 text-[10px] font-mono ${
+                    className={`tab-count ${
                       active
                         ? 'bg-amber-400/15 text-amber-300'
                         : 'bg-ink-850 text-ink-500'
@@ -299,6 +418,7 @@ export default function RepoDetail() {
         </nav>
       </div>
 
+      {tab === 'overview' && <ReadmePanel repoId={String(id)} />}
       {tab === 'code' && <RepoTree repoId={String(id)} />}
       {tab === 'releases' && (
         <ReleasesViewer repoId={id} releases={releases} />
@@ -356,6 +476,17 @@ export default function RepoDetail() {
   );
 }
 
+function formatCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
+  if (n >= 10_000) return `${Math.round(n / 1000)}k`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
+
+function stripUrl(url: string): string {
+  return url.replace(/^https?:\/\//, '').replace(/\/$/, '');
+}
+
 function Stat({ label, value }: { label: string; value: number | string }) {
   return (
     <div className="stat-card">
@@ -364,6 +495,35 @@ function Stat({ label, value }: { label: string; value: number | string }) {
       </p>
       <p className="text-xl font-semibold tabular-nums text-white">{value}</p>
     </div>
+  );
+}
+
+function ArchiveIcon() {
+  return (
+    <svg
+      className="w-4 h-4 text-amber-400 shrink-0 mt-0.5"
+      fill="currentColor"
+      viewBox="0 0 16 16"
+      aria-hidden
+    >
+      <path d="M0 2.5A1.5 1.5 0 0 1 1.5 1h13A1.5 1.5 0 0 1 16 2.5v1A1.5 1.5 0 0 1 14.5 5h-13A1.5 1.5 0 0 1 0 3.5ZM1.5 6h13v7.5a1.5 1.5 0 0 1-1.5 1.5h-10A1.5 1.5 0 0 1 1.5 13.5Zm4 1.75a.75.75 0 0 0 0 1.5h5a.75.75 0 0 0 0-1.5Z" />
+    </svg>
+  );
+}
+
+function StarIcon() {
+  return (
+    <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 16 16" aria-hidden>
+      <path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z" />
+    </svg>
+  );
+}
+
+function ForkIcon() {
+  return (
+    <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 16 16" aria-hidden>
+      <path d="M5 5.372v.878c0 .192.168.35.375.35h4.25c.207 0 .375-.158.375-.35v-.878a2.25 2.25 0 1 1 1.5 0v.878a1.85 1.85 0 0 1-1.85 1.85h-1.5v2.128a2.251 2.251 0 1 1-1.5 0V8.1h-1.5A1.85 1.85 0 0 1 3.5 6.25v-.878a2.25 2.25 0 1 1 1.5 0ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Zm6.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm-3 8.75a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z" />
+    </svg>
   );
 }
 

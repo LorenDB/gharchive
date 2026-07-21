@@ -15,6 +15,7 @@ import {
   downloadReleaseAsset,
   getReleaseAssetPath,
 } from '@/lib/releases';
+import { fetchRemoteRepoMeta } from '@/lib/remote-meta';
 import { hasEnoughMemory } from '@/lib/memory';
 import { sendAlert, repoLabel } from '@/lib/alerts';
 
@@ -137,6 +138,53 @@ export async function syncRepo(
     }
   } else {
     messages.push('git: initial clone');
+  }
+
+  // Scrape remote description / topics / stars / archived (best-effort)
+  try {
+    if (repo.platform === 'github' || repo.platform === 'gitlab') {
+      const prior = getDb().repos.find((r) => r.id === repo.id);
+      const wasArchived = Boolean(prior?.is_archived);
+      const hadRemoteMeta = Boolean(prior?.remote_meta_synced_at);
+
+      const meta = await fetchRemoteRepoMeta(
+        repo.platform,
+        repo.owner,
+        repo.name
+      );
+      if (meta) {
+        updateRepo(repo.id, {
+          ...meta,
+          remote_meta_synced_at: new Date().toISOString(),
+        });
+        messages.push(
+          meta.is_archived
+            ? 'meta: refreshed (upstream archived)'
+            : 'meta: remote description/topics refreshed'
+        );
+
+        // Fire once when we observe a transition to archived (not on first meta scrape)
+        if (meta.is_archived && !wasArchived && hadRemoteMeta) {
+          messages.push('remote: repository marked archived upstream');
+          await sendAlert({
+            category: 'repo_archived',
+            title: `Repo archived: ${label}`,
+            body: [
+              `**${label}** was marked as **archived** on the remote.`,
+              '',
+              'The local bare mirror and release archive are still kept.',
+              'No new commits or releases are expected from upstream.',
+            ].join('\n'),
+            subject: `${repo.id}:archived`,
+            severity: 'warning',
+          });
+        }
+      } else {
+        messages.push('meta: unavailable');
+      }
+    }
+  } catch (err: any) {
+    messages.push(`meta: failed - ${err?.message || err}`);
   }
 
   // Count previously archived releases for wipe detection

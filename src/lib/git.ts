@@ -406,6 +406,8 @@ export interface BlobResult {
 }
 
 const MAX_TEXT_BYTES = 512 * 1024; // 512 KB preview cap
+/** Cap for raw binary serving (README images, etc.) */
+const MAX_RAW_BYTES = 8 * 1024 * 1024; // 8 MB
 
 export async function getBlob(
   mirrorPath: string,
@@ -457,6 +459,130 @@ export async function getBlob(
   };
 }
 
+/**
+ * Read a file from the bare mirror as raw bytes (for image serving, etc.).
+ * Rejects paths that escape the tree; enforces a size cap.
+ */
+export async function getRawFile(
+  mirrorPath: string,
+  ref: string,
+  filePath: string,
+  maxBytes: number = MAX_RAW_BYTES
+): Promise<{ buffer: Buffer; size: number }> {
+  const safeRef = assertSafeGitArg(ref, 'ref');
+  // Normalize path: strip leading slashes, reject traversal
+  const normalized = normalizeRepoRelativePath('', filePath);
+  if (normalized == null) {
+    throw new Error('Invalid path');
+  }
+  const safePath = assertSafeGitArg(normalized, 'path');
+  const treeish = `${safeRef}:${safePath}`;
+
+  const { stdout: sizeStr } = await run(
+    `git -C "${mirrorPath}" cat-file -s "${treeish}"`
+  );
+  const size = parseInt(sizeStr.trim(), 10) || 0;
+
+  if (size > maxBytes) {
+    throw new Error(
+      `File too large to serve (${size} bytes; limit ${maxBytes})`
+    );
+  }
+
+  const { stdout: buffer } = await execAsync(
+    `git -C "${mirrorPath}" cat-file -p "${treeish}"`,
+    { encoding: 'buffer', maxBuffer: maxBytes + 1024 }
+  );
+
+  return { buffer: buffer as Buffer, size };
+}
+
+/**
+ * Resolve a path relative to a base directory inside the repo tree.
+ * Returns null for absolute URLs or paths that escape the repo root.
+ */
+export function normalizeRepoRelativePath(
+  baseDir: string,
+  href: string
+): string | null {
+  if (!href || typeof href !== 'string') return null;
+  const trimmed = href.trim();
+  if (!trimmed) return null;
+
+  // Absolute / special schemes — not a repo path
+  if (/^(https?:|data:|blob:|cid:|mailto:|javascript:)/i.test(trimmed)) {
+    return null;
+  }
+  // Protocol-relative
+  if (trimmed.startsWith('//')) return null;
+
+  // Strip query/hash
+  let path = trimmed.split('#')[0].split('?')[0];
+  if (!path) return null;
+
+  // Decode percent-encoding (e.g. %20)
+  try {
+    path = decodeURIComponent(path);
+  } catch {
+    // keep raw
+  }
+
+  const segments: string[] = [];
+  if (path.startsWith('/')) {
+    // Absolute within repo
+    for (const p of path.slice(1).split('/')) {
+      if (p === '' || p === '.') continue;
+      if (p === '..') return null;
+      segments.push(p);
+    }
+  } else {
+    for (const p of [
+      ...baseDir.split('/').filter(Boolean),
+      ...path.split('/'),
+    ]) {
+      if (p === '' || p === '.') continue;
+      if (p === '..') {
+        if (segments.length === 0) return null;
+        segments.pop();
+      } else {
+        segments.push(p);
+      }
+    }
+  }
+
+  if (segments.length === 0) return null;
+  // Disallow weird control chars already handled by assertSafeGitArg later
+  return segments.join('/');
+}
+
+/** Guess Content-Type from a repo file path. */
+export function contentTypeForPath(filePath: string): string {
+  const ext = filePath.split('.').pop()?.toLowerCase() || '';
+  const map: Record<string, string> = {
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    svg: 'image/svg+xml',
+    ico: 'image/x-icon',
+    bmp: 'image/bmp',
+    avif: 'image/avif',
+    apng: 'image/apng',
+    pdf: 'application/pdf',
+    txt: 'text/plain; charset=utf-8',
+    md: 'text/markdown; charset=utf-8',
+    json: 'application/json',
+    css: 'text/css; charset=utf-8',
+    js: 'text/javascript; charset=utf-8',
+    html: 'text/html; charset=utf-8',
+    htm: 'text/html; charset=utf-8',
+    mp4: 'video/mp4',
+    webm: 'video/webm',
+  };
+  return map[ext] || 'application/octet-stream';
+}
+
 export async function getCommitInfo(
   mirrorPath: string,
   ref: string
@@ -472,5 +598,67 @@ export async function getCommitInfo(
   } catch {
     return null;
   }
+}
+
+/**
+ * Find a README-like file at the root of `ref` and return its blob.
+ * Tries common filenames in order; falls back to a case-insensitive root
+ * tree scan preferring Markdown over plain text.
+ */
+export async function getReadmeBlob(
+  mirrorPath: string,
+  ref: string,
+  candidates: string[]
+): Promise<(BlobResult & { path: string }) | null> {
+  const safeRef = assertSafeGitArg(ref, 'ref');
+
+  for (const name of candidates) {
+    try {
+      const blob = await getBlob(mirrorPath, safeRef, name);
+      if (!blob.binary) {
+        return { ...blob, path: name };
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+
+  // Case-insensitive fallback via root tree listing.
+  // Prefer .md > .markdown > .mdown > bare README > .txt > .rst
+  try {
+    const entries = await listTree(mirrorPath, safeRef, '');
+    const rank = (name: string): number => {
+      const lower = name.toLowerCase();
+      if (lower === 'readme.md') return 0;
+      if (lower.endsWith('.markdown') || lower.endsWith('.mdown')) return 1;
+      if (lower.endsWith('.md')) return 2;
+      if (lower === 'readme') return 3;
+      if (lower.endsWith('.txt')) return 4;
+      if (lower.endsWith('.rst')) return 5;
+      return 9;
+    };
+    const matches = entries
+      .filter(
+        (e) =>
+          e.type === 'blob' &&
+          /^readme(\.(md|markdown|mdown|rst|txt))?$/i.test(e.name)
+      )
+      .sort((a, b) => rank(a.name) - rank(b.name) || a.name.localeCompare(b.name));
+
+    for (const entry of matches) {
+      try {
+        const blob = await getBlob(mirrorPath, safeRef, entry.name);
+        if (!blob.binary) {
+          return { ...blob, path: entry.name };
+        }
+      } catch {
+        // try next
+      }
+    }
+  } catch {
+    // no readme
+  }
+
+  return null;
 }
 

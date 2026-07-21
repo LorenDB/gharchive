@@ -69,6 +69,8 @@ export interface Settings {
   alert_history_wiped: boolean;
   /** Alert when the remote repository is gone (404 / not found) */
   alert_repo_deleted: boolean;
+  /** Alert when the remote repository is marked as archived */
+  alert_repo_archived: boolean;
   /** Alert when a repo sync fails for other reasons */
   alert_sync_failed: boolean;
   /** Alert when DATA_DIR disk usage is high / free space is low */
@@ -109,6 +111,7 @@ export const DEFAULT_SETTINGS: Settings = {
   alert_releases_wiped: true,
   alert_history_wiped: true,
   alert_repo_deleted: true,
+  alert_repo_archived: true,
   alert_sync_failed: false,
   alert_storage_low: true,
   alert_memory_low: true,
@@ -172,6 +175,31 @@ export interface Repo {
   from_star?: boolean;
   /** True if added via owned-repos import */
   from_owned?: boolean;
+
+  /**
+   * User-authored notes for why this repo is archived (local only;
+   * separate from remote_description scraped from GitHub/GitLab).
+   */
+  local_description?: string | null;
+
+  // ── Cached remote metadata (refreshed on sync) ────────────────
+  /** Description from the hosting platform */
+  remote_description?: string | null;
+  /** Topics / tags from the hosting platform */
+  topics?: string[];
+  language?: string | null;
+  homepage?: string | null;
+  stargazers_count?: number | null;
+  forks_count?: number | null;
+  /** SPDX id or license name when available */
+  license?: string | null;
+  is_private?: boolean;
+  is_archived?: boolean;
+  is_fork?: boolean;
+  /** Last activity timestamp reported by the remote */
+  remote_updated_at?: string | null;
+  /** When remote metadata was last scraped */
+  remote_meta_synced_at?: string | null;
 }
 
 interface Release {
@@ -627,10 +655,29 @@ export function getRepoById(id: number): Repo | undefined {
   return load().repos.find((r) => r.id === id && r.owner_id === userId);
 }
 
-export function updateRepo(
-  id: number,
-  updates: Partial<Pick<Repo, 'last_synced_at' | 'from_star' | 'from_owned'>>
-) {
+export type RepoUpdatableFields = Partial<
+  Pick<
+    Repo,
+    | 'last_synced_at'
+    | 'from_star'
+    | 'from_owned'
+    | 'local_description'
+    | 'remote_description'
+    | 'topics'
+    | 'language'
+    | 'homepage'
+    | 'stargazers_count'
+    | 'forks_count'
+    | 'license'
+    | 'is_private'
+    | 'is_archived'
+    | 'is_fork'
+    | 'remote_updated_at'
+    | 'remote_meta_synced_at'
+  >
+>;
+
+export function updateRepo(id: number, updates: RepoUpdatableFields) {
   load();
   const userId = tryGetUserId();
   const idx = data!.repos.findIndex(
