@@ -7,8 +7,11 @@ import {
   requireGithubToken,
   scanAndMaybeImportStars,
 } from '@/lib/import-stars';
+import { ensureApiAuth } from '@/lib/api-auth';
 
 export async function GET() {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   return NextResponse.json({ job: getImportStatus() });
 }
 
@@ -19,6 +22,8 @@ export async function GET() {
  * - { full_names: string[], list_ids?: string[] } — manual selection
  */
 export async function POST(req: NextRequest) {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   try {
     const body = await req.json().catch(() => ({}));
 

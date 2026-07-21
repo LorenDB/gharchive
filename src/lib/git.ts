@@ -2,6 +2,11 @@ import { exec as execCb } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs';
+import {
+  AUTOLOGIN_USER_ID,
+  safeUserPathSegment,
+  tryGetUserId,
+} from '@/lib/user-context';
 
 const execAsync = promisify(execCb);
 
@@ -12,8 +17,29 @@ function run(cmd: string, cwd?: string): Promise<{ stdout: string; stderr: strin
   return execAsync(cmd, { encoding: 'utf8', cwd, maxBuffer: 10 * 1024 * 1024 });
 }
 
-export function getMirrorPath(platform: string, owner: string, name: string): string {
-  return path.join(MIRRORS_DIR, platform, owner, name + '.git');
+/**
+ * On-disk path for a bare mirror.
+ * - Autologin / legacy: `mirrors/{platform}/{owner}/{name}.git`
+ * - SSO users: `mirrors/users/{userId}/{platform}/{owner}/{name}.git`
+ */
+export function getMirrorPath(
+  platform: string,
+  owner: string,
+  name: string,
+  userId?: string
+): string {
+  const uid = userId ?? tryGetUserId() ?? AUTOLOGIN_USER_ID;
+  if (uid === AUTOLOGIN_USER_ID) {
+    return path.join(MIRRORS_DIR, platform, owner, name + '.git');
+  }
+  return path.join(
+    MIRRORS_DIR,
+    'users',
+    safeUserPathSegment(uid),
+    platform,
+    owner,
+    name + '.git'
+  );
 }
 
 export async function cloneMirror(cloneUrl: string, mirrorPath: string): Promise<void> {

@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb, getReleaseAssets } from '@/lib/db';
+import { ensureApiAuth } from '@/lib/api-auth';
 
 export async function GET(
   _req: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   const { repos } = getDb();
   const repo = repos.find((r) => r.id === parseInt(params.id));
 

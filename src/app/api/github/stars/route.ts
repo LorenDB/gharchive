@@ -2,9 +2,12 @@ import { NextResponse } from 'next/server';
 import { findRepo, getGithubAccountPublic } from '@/lib/db';
 import { fetchStarsPreview } from '@/lib/github';
 import { requireGithubToken } from '@/lib/import-stars';
+import { ensureApiAuth } from '@/lib/api-auth';
 
 /** Preview starred repos + GitHub lists (does not clone). */
 export async function GET() {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   try {
     const account = getGithubAccountPublic();
     if (!account) {

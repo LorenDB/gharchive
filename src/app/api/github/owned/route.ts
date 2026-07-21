@@ -8,9 +8,12 @@ import {
   getImportStatus,
   scanAndMaybeImportOwned,
 } from '@/lib/import-stars';
+import { ensureApiAuth } from '@/lib/api-auth';
 
 /** Preview owned repositories for the linked account. */
 export async function GET() {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   try {
     const account = getGithubAccountPublic();
     if (!account) {
@@ -60,6 +63,8 @@ export async function GET() {
  * Body: { full_names?: string[], all_missing?: boolean, scan?: boolean, force_import?: boolean }
  */
 export async function POST(req: NextRequest) {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   try {
     const body = await req.json().catch(() => ({}));
 

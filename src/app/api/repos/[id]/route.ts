@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb, deleteRepo, getRepoLists, getLists } from '@/lib/db';
 import { deleteMirror, mirrorStat } from '@/lib/git';
+import { ensureApiAuth } from '@/lib/api-auth';
 
 export async function GET(
   _req: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   const { repos, syncLogs } = getDb();
   const repo = repos.find((r) => r.id === parseInt(params.id));
 
@@ -41,6 +44,8 @@ export async function DELETE(
   _req: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   const id = parseInt(params.id);
   const { repos } = getDb();
   const repo = repos.find((r) => r.id === id);

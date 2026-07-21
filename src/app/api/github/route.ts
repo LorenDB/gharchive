@@ -5,13 +5,18 @@ import {
   clearGithubAccount,
 } from '@/lib/db';
 import { validateGithubToken } from '@/lib/github';
+import { ensureApiAuth } from '@/lib/api-auth';
 
 export async function GET() {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   return NextResponse.json({ account: getGithubAccountPublic() });
 }
 
 /** Link a GitHub account via personal access token. */
 export async function PUT(req: NextRequest) {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   try {
     const body = await req.json();
     const token = typeof body.token === 'string' ? body.token.trim() : '';
@@ -40,6 +45,8 @@ export async function PUT(req: NextRequest) {
 }
 
 export async function DELETE() {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   clearGithubAccount();
   return NextResponse.json({ ok: true });
 }

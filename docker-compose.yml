@@ -5,8 +5,17 @@ services:
       - '3000:3000'
     volumes:
       - ./data:/data
+    # Compose loads a host `.env` for ${...} interpolation (see .env.example).
     environment:
-      - DATA_DIR=/data
-      - GITHUB_TOKEN=
-      - GITLAB_TOKEN=
+      DATA_DIR: /data
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITLAB_TOKEN: ${GITLAB_TOKEN:-}
+      # OIDC / SSO — leave empty for autologin (shows warning banner)
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_SCOPES: ${OIDC_SCOPES:-openid profile email}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-}
     restart: unless-stopped

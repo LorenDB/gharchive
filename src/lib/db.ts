@@ -1,5 +1,11 @@
 import path from 'path';
 import fs from 'fs';
+import {
+  AUTOLOGIN_USER_ID,
+  getRequiredUserId,
+  tryGetUserId,
+} from '@/lib/user-context';
+import type { SessionUser } from '@/lib/session';
 
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const DB_PATH = path.join(DATA_DIR, 'db.json');
@@ -52,8 +58,19 @@ export interface GithubAccount {
   last_owned_import_at: string | null;
 }
 
+export interface AppUser {
+  id: string;
+  username: string;
+  email: string | null;
+  name: string | null;
+  created_at: string;
+  last_login_at: string;
+}
+
 export interface List {
   id: number;
+  /** Owning app user id (OIDC sub or autologin) */
+  owner_id: string;
   name: string;
   description: string | null;
   /** Tailwind-friendly hex color for badges */
@@ -72,6 +89,8 @@ export interface RepoList {
 
 export interface Repo {
   id: number;
+  /** Owning app user id (OIDC sub or autologin) */
+  owner_id: string;
   platform: 'github' | 'gitlab';
   owner: string;
   name: string;
@@ -115,14 +134,27 @@ interface SyncLog {
 }
 
 interface Data {
+  /** Schema marker for multi-user support */
+  schema_version: number;
+  users: AppUser[];
+  /**
+   * OIDC user id that received legacy no-auth (autologin) data.
+   * null until the first SSO login claims it.
+   */
+  legacy_claimed_by: string | null;
   repos: Repo[];
   releases: Release[];
   release_assets: ReleaseAsset[];
   sync_logs: SyncLog[];
-  settings: Settings;
+  /** Per-user settings (keyed by user id) */
+  settings_by_user: Record<string, Settings>;
   lists: List[];
   repo_lists: RepoList[];
-  github_account: GithubAccount | null;
+  /** Per-user linked GitHub accounts */
+  github_accounts: Record<string, GithubAccount>;
+  // Legacy single-tenant fields (migrated away on load)
+  settings?: Settings;
+  github_account?: GithubAccount | null;
 }
 
 export const LIST_COLORS = [
@@ -138,20 +170,21 @@ export const LIST_COLORS = [
   '#f472b6', // pink
 ];
 
+const SCHEMA_VERSION = 2;
+
 let data: Data | null = null;
 let nextIds: Record<string, number> = {};
 
-function load(): Data {
-  if (data) return data;
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-  if (fs.existsSync(DB_PATH)) {
-    data = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
-  } else {
-    data = emptyData();
-  }
-  const d = data!;
+function isLegacyOwner(ownerId: string | undefined | null): boolean {
+  return !ownerId || ownerId === AUTOLOGIN_USER_ID;
+}
+
+function migrate(raw: Record<string, unknown>): Data {
+  const d = raw as unknown as Data;
+
+  if (!Array.isArray(d.users)) d.users = [];
+  if (d.legacy_claimed_by === undefined) d.legacy_claimed_by = null;
+
   for (const key of [
     'repos',
     'releases',
@@ -162,8 +195,52 @@ function load(): Data {
   ] as const) {
     if (!Array.isArray((d as any)[key])) (d as any)[key] = [];
   }
-  d.settings = { ...DEFAULT_SETTINGS, ...(d.settings || {}) };
-  if (d.github_account === undefined) d.github_account = null;
+
+  // settings → settings_by_user
+  if (!d.settings_by_user || typeof d.settings_by_user !== 'object') {
+    d.settings_by_user = {};
+  }
+  if (d.settings && Object.keys(d.settings_by_user).length === 0) {
+    d.settings_by_user[AUTOLOGIN_USER_ID] = {
+      ...DEFAULT_SETTINGS,
+      ...d.settings,
+    };
+  }
+  delete d.settings;
+
+  // github_account → github_accounts
+  if (!d.github_accounts || typeof d.github_accounts !== 'object') {
+    d.github_accounts = {};
+  }
+  if (d.github_account && Object.keys(d.github_accounts).length === 0) {
+    d.github_accounts[AUTOLOGIN_USER_ID] = d.github_account;
+  }
+  delete d.github_account;
+
+  // owner_id on repos / lists
+  for (const r of d.repos) {
+    if (!r.owner_id) r.owner_id = AUTOLOGIN_USER_ID;
+  }
+  for (const l of d.lists) {
+    if (!l.owner_id) l.owner_id = AUTOLOGIN_USER_ID;
+  }
+
+  d.schema_version = SCHEMA_VERSION;
+  return d;
+}
+
+function load(): Data {
+  if (data) return data;
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+  if (fs.existsSync(DB_PATH)) {
+    const raw = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+    data = migrate(raw);
+  } else {
+    data = emptyData();
+  }
+  const d = data!;
 
   nextIds.repos = d.repos.reduce((max, r) => Math.max(max, r.id), 0) + 1;
   nextIds.releases = d.releases.reduce((max, r) => Math.max(max, r.id), 0) + 1;
@@ -176,14 +253,17 @@ function load(): Data {
 
 function emptyData(): Data {
   return {
+    schema_version: SCHEMA_VERSION,
+    users: [],
+    legacy_claimed_by: null,
     repos: [],
     releases: [],
     release_assets: [],
     sync_logs: [],
-    settings: { ...DEFAULT_SETTINGS },
+    settings_by_user: {},
     lists: [],
     repo_lists: [],
-    github_account: null,
+    github_accounts: {},
   };
 }
 
@@ -193,35 +273,166 @@ function save() {
   }
 }
 
-export function getDb() {
+function uid(): string {
+  return getRequiredUserId();
+}
+
+function ownedRepos(userId: string): Repo[] {
+  return load().repos.filter((r) => r.owner_id === userId);
+}
+
+function ownedLists(userId: string): List[] {
+  return load().lists.filter((l) => l.owner_id === userId);
+}
+
+// ── Users / legacy claim ────────────────────────────────────────
+
+/**
+ * Upsert the SSO (or autologin) user. The first SSO login claims any data
+ * created under the no-auth admin account.
+ */
+export function ensureAppUser(session: SessionUser): {
+  user: AppUser;
+  claimed_legacy: boolean;
+} {
+  load();
+  const now = new Date().toISOString();
+  let claimed_legacy = false;
+
+  let user = data!.users.find((u) => u.id === session.id);
+  if (!user) {
+    user = {
+      id: session.id,
+      username: session.username,
+      email: session.email,
+      name: session.name,
+      created_at: now,
+      last_login_at: now,
+    };
+    data!.users.push(user);
+
+    // First SSO user (not the synthetic autologin id) inherits legacy data
+    if (
+      session.id !== AUTOLOGIN_USER_ID &&
+      data!.legacy_claimed_by == null
+    ) {
+      claimLegacyData(session.id);
+      data!.legacy_claimed_by = session.id;
+      claimed_legacy = true;
+    }
+  } else {
+    user.username = session.username;
+    user.email = session.email;
+    user.name = session.name;
+    user.last_login_at = now;
+  }
+
+  // Ensure settings bucket exists
+  if (!data!.settings_by_user[session.id]) {
+    data!.settings_by_user[session.id] = { ...DEFAULT_SETTINGS };
+  }
+
+  save();
+  return { user: { ...user }, claimed_legacy };
+}
+
+/** Reassign autologin / unscoped data to `newOwnerId`. */
+function claimLegacyData(newOwnerId: string) {
+  const d = data!;
+  for (const r of d.repos) {
+    if (isLegacyOwner(r.owner_id)) r.owner_id = newOwnerId;
+  }
+  for (const l of d.lists) {
+    if (isLegacyOwner(l.owner_id)) l.owner_id = newOwnerId;
+  }
+
+  if (d.settings_by_user[AUTOLOGIN_USER_ID] && !d.settings_by_user[newOwnerId]) {
+    d.settings_by_user[newOwnerId] = {
+      ...DEFAULT_SETTINGS,
+      ...d.settings_by_user[AUTOLOGIN_USER_ID],
+    };
+  }
+  delete d.settings_by_user[AUTOLOGIN_USER_ID];
+
+  if (d.github_accounts[AUTOLOGIN_USER_ID] && !d.github_accounts[newOwnerId]) {
+    d.github_accounts[newOwnerId] = d.github_accounts[AUTOLOGIN_USER_ID];
+  }
+  delete d.github_accounts[AUTOLOGIN_USER_ID];
+}
+
+export function getLegacyClaimStatus(): {
+  claimed_by: string | null;
+  unclaimed_repo_count: number;
+} {
   const d = load();
+  const unclaimed = d.repos.filter((r) => isLegacyOwner(r.owner_id)).length;
   return {
-    repos: d.repos,
-    releases: d.releases,
-    releaseAssets: d.release_assets,
-    syncLogs: d.sync_logs,
-    settings: d.settings,
-    lists: d.lists,
-    repoLists: d.repo_lists,
-    githubAccount: d.github_account,
+    claimed_by: d.legacy_claimed_by,
+    unclaimed_repo_count: d.legacy_claimed_by ? 0 : unclaimed,
+  };
+}
+
+/** All known user ids that own data or have logged in (for scheduler). */
+export function listUserIds(): string[] {
+  const d = load();
+  const ids = new Set<string>();
+  for (const u of d.users) ids.add(u.id);
+  for (const r of d.repos) ids.add(r.owner_id);
+  for (const l of d.lists) ids.add(l.owner_id);
+  for (const k of Object.keys(d.settings_by_user)) ids.add(k);
+  for (const k of Object.keys(d.github_accounts)) ids.add(k);
+  // Always include autologin if any legacy remains
+  if (d.repos.some((r) => isLegacyOwner(r.owner_id))) {
+    ids.add(AUTOLOGIN_USER_ID);
+  }
+  if (ids.size === 0) ids.add(AUTOLOGIN_USER_ID);
+  return [...ids];
+}
+
+// ── Scoped db view ──────────────────────────────────────────────
+
+export function getDb() {
+  const userId = uid();
+  const d = load();
+  const repos = ownedRepos(userId);
+  const repoIds = new Set(repos.map((r) => r.id));
+  return {
+    repos,
+    releases: d.releases.filter((r) => repoIds.has(r.repo_id)),
+    releaseAssets: d.release_assets.filter((a) =>
+      d.releases.some((r) => r.id === a.release_id && repoIds.has(r.repo_id))
+    ),
+    syncLogs: d.sync_logs.filter((l) => repoIds.has(l.repo_id)),
+    settings: getSettings(),
+    lists: ownedLists(userId),
+    repoLists: d.repo_lists.filter((rl) => repoIds.has(rl.repo_id)),
+    githubAccount: getGithubAccount(),
   };
 }
 
 export function getSettings(): Settings {
-  return { ...load().settings };
+  const userId = tryGetUserId() ?? AUTOLOGIN_USER_ID;
+  const stored = load().settings_by_user[userId];
+  return { ...DEFAULT_SETTINGS, ...(stored || {}) };
 }
 
 export function updateSettings(partial: Partial<Settings>): Settings {
   load();
-  data!.settings = { ...data!.settings, ...partial };
+  const userId = uid();
+  data!.settings_by_user[userId] = {
+    ...DEFAULT_SETTINGS,
+    ...data!.settings_by_user[userId],
+    ...partial,
+  };
   save();
-  return { ...data!.settings };
+  return getSettings();
 }
 
 // ── GitHub account ──────────────────────────────────────────────
 
 export function getGithubAccount(): GithubAccount | null {
-  const acc = load().github_account;
+  const userId = tryGetUserId() ?? AUTOLOGIN_USER_ID;
+  const acc = load().github_accounts[userId];
   return acc ? { ...acc } : null;
 }
 
@@ -235,7 +446,7 @@ export function getGithubAccountPublic(): {
   last_owned_import_at: string | null;
   has_token: boolean;
 } | null {
-  const acc = load().github_account;
+  const acc = getGithubAccount();
   if (!acc) return null;
   return {
     username: acc.username,
@@ -250,7 +461,8 @@ export function getGithubAccountPublic(): {
 
 export function setGithubAccount(account: GithubAccount): GithubAccount {
   load();
-  data!.github_account = {
+  const userId = uid();
+  data!.github_accounts[userId] = {
     ...account,
     last_stars_scan_at: account.last_stars_scan_at ?? null,
     last_owned_scan_at: account.last_owned_scan_at ?? null,
@@ -258,19 +470,22 @@ export function setGithubAccount(account: GithubAccount): GithubAccount {
     last_stars_import_at: account.last_stars_import_at ?? null,
   };
   save();
-  return { ...data!.github_account! };
+  return { ...data!.github_accounts[userId]! };
 }
 
 export function clearGithubAccount() {
   load();
-  data!.github_account = null;
+  const userId = uid();
+  delete data!.github_accounts[userId];
   save();
 }
 
 export function touchGithubImport() {
   load();
-  if (data!.github_account) {
-    data!.github_account.last_stars_import_at = new Date().toISOString();
+  const userId = uid();
+  const acc = data!.github_accounts[userId];
+  if (acc) {
+    acc.last_stars_import_at = new Date().toISOString();
     save();
   }
 }
@@ -280,21 +495,23 @@ export function touchGithubScan(
   opts: { imported?: boolean } = {}
 ) {
   load();
-  if (!data!.github_account) return;
+  const userId = uid();
+  const acc = data!.github_accounts[userId];
+  if (!acc) return;
   const now = new Date().toISOString();
   if (kind === 'stars') {
-    data!.github_account.last_stars_scan_at = now;
-    if (opts.imported) data!.github_account.last_stars_import_at = now;
+    acc.last_stars_scan_at = now;
+    if (opts.imported) acc.last_stars_import_at = now;
   } else {
-    data!.github_account.last_owned_scan_at = now;
-    if (opts.imported) data!.github_account.last_owned_import_at = now;
+    acc.last_owned_scan_at = now;
+    if (opts.imported) acc.last_owned_import_at = now;
   }
   save();
 }
 
 /** Prefer linked account token, then env GITHUB_TOKEN */
 export function getGithubToken(): string | undefined {
-  const acc = load().github_account;
+  const acc = getGithubAccount();
   if (acc?.token) return acc.token;
   return process.env.GITHUB_TOKEN || undefined;
 }
@@ -302,12 +519,16 @@ export function getGithubToken(): string | undefined {
 // ── Repos ───────────────────────────────────────────────────────
 
 export function addRepo(
-  repo: Omit<Repo, 'id' | 'created_at'> & { from_star?: boolean }
+  repo: Omit<Repo, 'id' | 'created_at' | 'owner_id'> & {
+    from_star?: boolean;
+    owner_id?: string;
+  }
 ): Repo {
   load();
   const now = new Date().toISOString();
   const newRepo: Repo = {
     ...repo,
+    owner_id: repo.owner_id || uid(),
     id: nextIds.repos++,
     created_at: now,
   };
@@ -321,10 +542,19 @@ export function findRepo(
   owner: string,
   name: string
 ): Repo | undefined {
-  load();
-  return data!.repos.find(
-    (r) => r.platform === platform && r.owner === owner && r.name === name
+  const userId = uid();
+  return load().repos.find(
+    (r) =>
+      r.owner_id === userId &&
+      r.platform === platform &&
+      r.owner === owner &&
+      r.name === name
   );
+}
+
+export function getRepoById(id: number): Repo | undefined {
+  const userId = uid();
+  return load().repos.find((r) => r.id === id && r.owner_id === userId);
 }
 
 export function updateRepo(
@@ -332,7 +562,10 @@ export function updateRepo(
   updates: Partial<Pick<Repo, 'last_synced_at' | 'from_star' | 'from_owned'>>
 ) {
   load();
-  const idx = data!.repos.findIndex((r) => r.id === id);
+  const userId = tryGetUserId();
+  const idx = data!.repos.findIndex(
+    (r) => r.id === id && (userId ? r.owner_id === userId : true)
+  );
   if (idx >= 0) {
     Object.assign(data!.repos[idx], updates);
     save();
@@ -341,6 +574,10 @@ export function updateRepo(
 
 export function deleteRepo(id: number) {
   load();
+  const userId = uid();
+  const repo = data!.repos.find((r) => r.id === id && r.owner_id === userId);
+  if (!repo) return;
+
   const releaseIds = new Set(
     data!.releases.filter((r) => r.repo_id === id).map((r) => r.id)
   );
@@ -357,29 +594,39 @@ export function deleteRepo(id: number) {
 // ── Lists ───────────────────────────────────────────────────────
 
 export function getLists(): List[] {
-  return [...load().lists].sort((a, b) => a.name.localeCompare(b.name));
+  return [...ownedLists(uid())].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export function getList(id: number): List | undefined {
-  return load().lists.find((l) => l.id === id);
+  const userId = uid();
+  return load().lists.find((l) => l.id === id && l.owner_id === userId);
 }
 
 export function getListByGithubId(githubListId: string): List | undefined {
-  return load().lists.find((l) => l.github_list_id === githubListId);
+  const userId = uid();
+  return load().lists.find(
+    (l) => l.owner_id === userId && l.github_list_id === githubListId
+  );
 }
 
 export function getListByName(name: string): List | undefined {
+  const userId = uid();
   const lower = name.toLowerCase();
-  return load().lists.find((l) => l.name.toLowerCase() === lower);
+  return load().lists.find(
+    (l) => l.owner_id === userId && l.name.toLowerCase() === lower
+  );
 }
 
 export function addList(
-  input: Omit<List, 'id' | 'created_at' | 'updated_at'>
+  input: Omit<List, 'id' | 'created_at' | 'updated_at' | 'owner_id'> & {
+    owner_id?: string;
+  }
 ): List {
   load();
   const now = new Date().toISOString();
   const list: List = {
     ...input,
+    owner_id: input.owner_id || uid(),
     id: nextIds.lists++,
     created_at: now,
     updated_at: now,
@@ -389,7 +636,7 @@ export function addList(
   return list;
 }
 
-/** Get or create a local system list by exact name. */
+/** Get or create a local system list by exact name (for current user). */
 export function ensureLocalList(
   name: string,
   description: string | null,
@@ -413,7 +660,10 @@ export function updateList(
   >
 ): List | null {
   load();
-  const idx = data!.lists.findIndex((l) => l.id === id);
+  const userId = uid();
+  const idx = data!.lists.findIndex(
+    (l) => l.id === id && l.owner_id === userId
+  );
   if (idx < 0) return null;
   Object.assign(data!.lists[idx], updates, {
     updated_at: new Date().toISOString(),
@@ -424,28 +674,42 @@ export function updateList(
 
 export function deleteList(id: number) {
   load();
+  const userId = uid();
+  const list = data!.lists.find((l) => l.id === id && l.owner_id === userId);
+  if (!list) return;
   data!.lists = data!.lists.filter((l) => l.id !== id);
   data!.repo_lists = data!.repo_lists.filter((rl) => rl.list_id !== id);
   save();
 }
 
 export function getRepoListIds(repoId: number): number[] {
+  // Ownership enforced via getRepoById at call sites; filter list links to owned lists
+  const userId = uid();
+  const ownedListIds = new Set(ownedLists(userId).map((l) => l.id));
   return load()
-    .repo_lists.filter((rl) => rl.repo_id === repoId)
+    .repo_lists.filter(
+      (rl) => rl.repo_id === repoId && ownedListIds.has(rl.list_id)
+    )
     .map((rl) => rl.list_id);
 }
 
 export function getRepoLists(repoId: number): List[] {
   const ids = new Set(getRepoListIds(repoId));
-  return load().lists.filter((l) => ids.has(l.id));
+  return ownedLists(uid()).filter((l) => ids.has(l.id));
 }
 
 export function setRepoLists(repoId: number, listIds: number[]) {
   load();
+  const userId = uid();
+  const repo = data!.repos.find((r) => r.id === repoId && r.owner_id === userId);
+  if (!repo) return;
+
   data!.repo_lists = data!.repo_lists.filter((rl) => rl.repo_id !== repoId);
   const unique = [...new Set(listIds)];
   for (const list_id of unique) {
-    if (data!.lists.some((l) => l.id === list_id)) {
+    if (
+      data!.lists.some((l) => l.id === list_id && l.owner_id === userId)
+    ) {
       data!.repo_lists.push({ repo_id: repoId, list_id });
     }
   }
@@ -454,10 +718,15 @@ export function setRepoLists(repoId: number, listIds: number[]) {
 
 export function addRepoToList(repoId: number, listId: number) {
   load();
+  const userId = uid();
+  const repo = data!.repos.find((r) => r.id === repoId && r.owner_id === userId);
+  const list = data!.lists.find((l) => l.id === listId && l.owner_id === userId);
+  if (!repo || !list) return;
+
   const exists = data!.repo_lists.some(
     (rl) => rl.repo_id === repoId && rl.list_id === listId
   );
-  if (!exists && data!.lists.some((l) => l.id === listId)) {
+  if (!exists) {
     data!.repo_lists.push({ repo_id: repoId, list_id: listId });
     save();
   }
@@ -465,6 +734,9 @@ export function addRepoToList(repoId: number, listId: number) {
 
 export function removeRepoFromList(repoId: number, listId: number) {
   load();
+  const userId = uid();
+  const repo = data!.repos.find((r) => r.id === repoId && r.owner_id === userId);
+  if (!repo) return;
   data!.repo_lists = data!.repo_lists.filter(
     (rl) => !(rl.repo_id === repoId && rl.list_id === listId)
   );
@@ -472,14 +744,23 @@ export function removeRepoFromList(repoId: number, listId: number) {
 }
 
 export function getListRepoIds(listId: number): number[] {
-  return load()
-    .repo_lists.filter((rl) => rl.list_id === listId)
+  load();
+  const userId = uid();
+  const list = data!.lists.find((l) => l.id === listId && l.owner_id === userId);
+  if (!list) return [];
+  const ownedRepoIds = new Set(ownedRepos(userId).map((r) => r.id));
+  return data!.repo_lists
+    .filter((rl) => rl.list_id === listId && ownedRepoIds.has(rl.repo_id))
     .map((rl) => rl.repo_id);
 }
 
 export function getListCounts(): Record<number, number> {
+  const userId = uid();
+  const ownedRepoIds = new Set(ownedRepos(userId).map((r) => r.id));
+  const ownedListIds = new Set(ownedLists(userId).map((l) => l.id));
   const counts: Record<number, number> = {};
   for (const rl of load().repo_lists) {
+    if (!ownedRepoIds.has(rl.repo_id) || !ownedListIds.has(rl.list_id)) continue;
     counts[rl.list_id] = (counts[rl.list_id] || 0) + 1;
   }
   return counts;
@@ -506,7 +787,7 @@ export function upsertGithubList(input: {
       }) || existing
     );
   }
-  const used = data!.lists.length;
+  const used = ownedLists(uid()).length;
   return addList({
     name: input.name,
     description: input.description,

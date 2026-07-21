@@ -11,6 +11,8 @@ import {
   runScheduledGithubScan,
   startScheduler,
 } from '@/lib/scheduler';
+import { ensureApiAuth } from '@/lib/api-auth';
+import { getRequiredUserId } from '@/lib/user-context';
 
 const INTERVAL_OPTIONS = [1, 6, 12, 24, 48, 168] as const;
 
@@ -28,6 +30,8 @@ function parseHours(
 }
 
 export async function GET() {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   return NextResponse.json({
     settings: getSettings(),
     defaults: DEFAULT_SETTINGS,
@@ -37,6 +41,8 @@ export async function GET() {
 }
 
 export async function PUT(req: NextRequest) {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   try {
     const body = await req.json();
     const patch: Partial<Settings> = {};
@@ -128,6 +134,8 @@ export async function PUT(req: NextRequest) {
  * Defaults: sync only (force). Set github_scan:true to run star/owned scan.
  */
 export async function POST(req: NextRequest) {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   try {
     const body = await req.json().catch(() => ({}));
     const force = Boolean(body?.force);
@@ -136,11 +144,12 @@ export async function POST(req: NextRequest) {
 
     const result: Record<string, unknown> = {};
 
+    const userId = getRequiredUserId();
     if (doSync) {
-      result.sync = await runScheduledSync(force);
+      result.sync = await runScheduledSync(force, userId);
     }
     if (doGithub) {
-      result.github = await runScheduledGithubScan(force);
+      result.github = await runScheduledGithubScan(force, userId);
     }
 
     return NextResponse.json({

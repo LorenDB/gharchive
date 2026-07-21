@@ -1,7 +1,8 @@
 import type { Metadata } from 'next';
 import { Plus_Jakarta_Sans, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
-import Navbar from '@/components/Navbar';
+import AuthWarningBanner from '@/components/AuthWarningBanner';
+import { isAutologinMode } from '@/lib/auth';
 
 const sans = Plus_Jakarta_Sans({
   subsets: ['latin'],
@@ -20,20 +21,21 @@ export const metadata: Metadata = {
   description: 'Self-hosted GitHub/GitLab repository archive',
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+// Auth mode depends on runtime env (Docker .env) — never bake at build time.
+export const dynamic = 'force-dynamic';
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  const autologin = isAutologinMode();
+
   return (
     <html lang="en" className={`${sans.variable} ${mono.variable}`}>
       <body className="font-sans min-h-screen flex flex-col">
-        <Navbar />
-        <main className="flex-1 w-full max-w-6xl mx-auto px-4 sm:px-6 py-8">
-          {children}
-        </main>
-        <footer className="border-t border-ink-900/80 py-6 mt-auto">
-          <div className="max-w-6xl mx-auto px-4 sm:px-6 flex flex-wrap items-center justify-between gap-2 text-xs text-ink-600">
-            <span>GHArchive · local repository vault</span>
-            <span className="font-mono">self-hosted</span>
-          </div>
-        </footer>
+        {autologin ? <AuthWarningBanner /> : null}
+        {children}
       </body>
     </html>
   );

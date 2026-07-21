@@ -21,6 +21,11 @@ import {
   type GhStarredRepo,
   type GhOwnedRepo,
 } from '@/lib/github';
+import {
+  getRequiredUserId,
+  runAsUserAsync,
+  tryGetUserId,
+} from '@/lib/user-context';
 
 export interface ImportItem {
   owner: string;
@@ -50,6 +55,8 @@ export interface ImportJobStatus {
 type JobState = ImportJobStatus & {
   queue: ImportItem[];
   listMap: Map<string, List>;
+  /** User who started the job — all db ops run as this user */
+  userId: string | null;
 };
 
 const g = globalThis as typeof globalThis & {
@@ -71,6 +78,7 @@ function job(): JobState {
       source: null,
       queue: [],
       listMap: new Map(),
+      userId: null,
     };
   }
   return g.__gharchiveImportJob;
@@ -120,6 +128,8 @@ export function startStarImport(
     throw new Error('No repositories selected');
   }
 
+  const userId = getRequiredUserId();
+
   j.running = true;
   j.total = items.length;
   j.completed = 0;
@@ -130,12 +140,17 @@ export function startStarImport(
   j.started_at = new Date().toISOString();
   j.finished_at = null;
   j.source = source;
+  j.userId = userId;
   j.queue = items.map((i) => ({ ...i, from_star: i.from_star ?? true }));
   j.listMap = ensureGithubLists(githubLists);
 
   processQueue()
     .then(() => {
-      if (source.includes('star')) touchGithubImport();
+      if (source.includes('star')) {
+        return runAsUserAsync(userId, async () => {
+          touchGithubImport();
+        });
+      }
     })
     .catch((err) => {
       console.error('[import] fatal:', err);
@@ -173,6 +188,8 @@ export async function runImportAwait(
     };
   }
 
+  const userId = tryGetUserId() ?? getRequiredUserId();
+
   j.running = true;
   j.total = items.length;
   j.completed = 0;
@@ -183,6 +200,7 @@ export async function runImportAwait(
   j.started_at = new Date().toISOString();
   j.finished_at = null;
   j.source = source;
+  j.userId = userId;
   j.queue = [...items];
   j.listMap = ensureGithubLists(githubLists);
 
@@ -199,28 +217,37 @@ export async function runImportAwait(
 
 async function processQueue() {
   const j = job();
-  while (j.queue.length > 0) {
-    const item = j.queue.shift()!;
-    const full = `${item.owner}/${item.name}`;
-    j.current = full;
-
-    try {
-      await importOne(item, j.listMap);
-      j.completed++;
-    } catch (err: any) {
-      if (err?.code === 'SKIPPED') {
-        j.skipped++;
-      } else {
-        j.failed++;
-        j.errors.push({ repo: full, error: err?.message || String(err) });
-        console.error(`[import] ${full}:`, err?.message || err);
-      }
-    }
+  const userId = j.userId;
+  if (!userId) {
+    j.running = false;
+    j.finished_at = new Date().toISOString();
+    throw new Error('Import job missing userId');
   }
 
-  j.current = null;
-  j.running = false;
-  j.finished_at = new Date().toISOString();
+  await runAsUserAsync(userId, async () => {
+    while (j.queue.length > 0) {
+      const item = j.queue.shift()!;
+      const full = `${item.owner}/${item.name}`;
+      j.current = full;
+
+      try {
+        await importOne(item, j.listMap);
+        j.completed++;
+      } catch (err: any) {
+        if (err?.code === 'SKIPPED') {
+          j.skipped++;
+        } else {
+          j.failed++;
+          j.errors.push({ repo: full, error: err?.message || String(err) });
+          console.error(`[import] ${full}:`, err?.message || err);
+        }
+      }
+    }
+
+    j.current = null;
+    j.running = false;
+    j.finished_at = new Date().toISOString();
+  });
 }
 
 async function importOne(item: ImportItem, listMap: Map<string, List>) {

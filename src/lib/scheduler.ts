@@ -1,17 +1,15 @@
-import {
-  getDb,
-  getSettings,
-  getGithubAccount,
-  getGithubToken,
-} from '@/lib/db';
+import { getSettings, listUserIds } from '@/lib/db';
+import { getGithubAccount, getGithubToken } from '@/lib/db';
+import { getDb } from '@/lib/db';
 import { syncRepo } from '@/lib/sync';
 import {
   scanAndMaybeImportStars,
   scanAndMaybeImportOwned,
   getImportStatus,
 } from '@/lib/import-stars';
+import { runAsUserAsync } from '@/lib/user-context';
 
-/** Check due work every minute; cadences come from settings. */
+/** Check due work every minute; cadences come from per-user settings. */
 const TICK_MS = 60_000;
 
 type SchedulerState = {
@@ -77,7 +75,11 @@ async function mapPool<T>(
   await Promise.all(workers);
 }
 
-export async function runScheduledSync(force = false): Promise<{
+export async function runScheduledSync(
+  force = false,
+  /** When set (e.g. UI "sync now"), only process this user */
+  onlyUserId?: string
+): Promise<{
   ran: boolean;
   synced: number;
   failed: number;
@@ -95,128 +97,167 @@ export async function runScheduledSync(force = false): Promise<{
     };
   }
 
-  const settings = getSettings();
-  if (!force && !settings.auto_sync_enabled) {
-    return {
-      ran: false,
-      synced: 0,
-      failed: 0,
-      skipped: 0,
-      message: 'Auto-sync is disabled',
-    };
-  }
-
-  const { repos } = getDb();
-  const due = force
-    ? repos
-    : repos.filter((r) => isDue(r.last_synced_at, settings.sync_interval_hours));
-
-  if (due.length === 0) {
-    return {
-      ran: false,
-      synced: 0,
-      failed: 0,
-      skipped: repos.length,
-      message: 'No repositories due for sync',
-    };
-  }
-
   s.running = true;
   let synced = 0;
   let failed = 0;
+  let skipped = 0;
+  let dueTotal = 0;
+  const userParts: string[] = [];
+  const userIds = onlyUserId ? [onlyUserId] : listUserIds();
 
   try {
-    await mapPool(due, settings.concurrent_syncs, async (repo) => {
-      try {
-        const result = await syncRepo(repo);
-        if (result.ok) synced++;
-        else failed++;
-      } catch {
-        failed++;
+    for (const userId of userIds) {
+      const part = await runAsUserAsync(userId, async () => {
+        const settings = getSettings();
+        if (!force && !settings.auto_sync_enabled) {
+          return { synced: 0, failed: 0, skipped: 0, due: 0, note: 'disabled' };
+        }
+
+        const { repos } = getDb();
+        const due = force
+          ? repos
+          : repos.filter((r) =>
+              isDue(r.last_synced_at, settings.sync_interval_hours)
+            );
+
+        let uSynced = 0;
+        let uFailed = 0;
+
+        await mapPool(due, settings.concurrent_syncs, async (repo) => {
+          try {
+            const result = await syncRepo(repo);
+            if (result.ok) uSynced++;
+            else uFailed++;
+          } catch {
+            uFailed++;
+          }
+        });
+
+        return {
+          synced: uSynced,
+          failed: uFailed,
+          skipped: repos.length - due.length,
+          due: due.length,
+          note: due.length ? `due ${due.length}` : 'none due',
+        };
+      });
+
+      synced += part.synced;
+      failed += part.failed;
+      skipped += part.skipped;
+      dueTotal += part.due;
+      if (part.due > 0 || part.synced > 0 || part.failed > 0) {
+        userParts.push(`${userId.slice(0, 12)}:${part.synced}/${part.failed}`);
       }
-    });
+    }
   } finally {
     s.running = false;
     s.lastRunAt = new Date().toISOString();
-    s.lastRunSummary = `synced ${synced}, failed ${failed}, of ${due.length} due`;
+    s.lastRunSummary =
+      dueTotal === 0
+        ? 'No repositories due for sync'
+        : `synced ${synced}, failed ${failed}, of ${dueTotal} due` +
+          (userParts.length ? ` [${userParts.join(', ')}]` : '');
   }
 
   return {
-    ran: true,
+    ran: dueTotal > 0,
     synced,
     failed,
-    skipped: repos.length - due.length,
+    skipped,
     message: s.lastRunSummary!,
   };
 }
 
-export async function runScheduledGithubScan(force = false): Promise<{
+export async function runScheduledGithubScan(
+  force = false,
+  onlyUserId?: string
+): Promise<{
   ran: boolean;
   messages: string[];
 }> {
-  const settings = getSettings();
-  const token = getGithubToken();
-  const account = getGithubAccount();
-
-  if (!token || !account) {
-    return { ran: false, messages: ['No linked GitHub account'] };
-  }
-
-  if (getImportStatus().running) {
-    return { ran: false, messages: ['Import already in progress'] };
-  }
-
-  const starsWanted =
-    settings.auto_scan_stars_enabled || settings.auto_import_stars_enabled;
-  const ownedWanted =
-    settings.auto_scan_owned_enabled || settings.auto_import_owned_enabled;
-
-  if (!force && !starsWanted && !ownedWanted) {
-    return { ran: false, messages: ['GitHub auto-scan disabled'] };
-  }
-
-  const interval = settings.github_scan_interval_hours;
   const messages: string[] = [];
   let ran = false;
+  const userIds = onlyUserId ? [onlyUserId] : listUserIds();
 
-  const starsDue =
-    force ||
-    (starsWanted && isDue(account.last_stars_scan_at, interval));
-  const ownedDue =
-    force ||
-    (ownedWanted && isDue(account.last_owned_scan_at, interval));
+  for (const userId of userIds) {
+    const userMessages = await runAsUserAsync(userId, async () => {
+      const settings = getSettings();
+      const token = getGithubToken();
+      const account = getGithubAccount();
+      const out: string[] = [];
 
-  if (starsDue && starsWanted) {
-    try {
-      // Respect auto_import_* settings; force only skips the interval check
-      const result = await scanAndMaybeImportStars();
-      messages.push(result.message);
-      ran = true;
-    } catch (err: any) {
-      messages.push(`stars scan failed: ${err?.message || err}`);
-      ran = true;
-    }
-  }
-
-  if (ownedDue && ownedWanted) {
-    if (getImportStatus().running) {
-      messages.push('owned: skipped (import busy)');
-    } else {
-      try {
-        const result = await scanAndMaybeImportOwned();
-        messages.push(result.message);
-        ran = true;
-      } catch (err: any) {
-        messages.push(`owned scan failed: ${err?.message || err}`);
-        ran = true;
+      if (!token || !account) {
+        return { ran: false, messages: out };
       }
-    }
+
+      if (getImportStatus().running) {
+        out.push(`${userId.slice(0, 12)}: import busy`);
+        return { ran: false, messages: out };
+      }
+
+      const starsWanted =
+        settings.auto_scan_stars_enabled || settings.auto_import_stars_enabled;
+      const ownedWanted =
+        settings.auto_scan_owned_enabled || settings.auto_import_owned_enabled;
+
+      if (!force && !starsWanted && !ownedWanted) {
+        return { ran: false, messages: out };
+      }
+
+      const interval = settings.github_scan_interval_hours;
+      let userRan = false;
+
+      const starsDue =
+        force || (starsWanted && isDue(account.last_stars_scan_at, interval));
+      const ownedDue =
+        force || (ownedWanted && isDue(account.last_owned_scan_at, interval));
+
+      if (starsDue && starsWanted) {
+        try {
+          const result = await scanAndMaybeImportStars();
+          out.push(`${userId.slice(0, 12)}: ${result.message}`);
+          userRan = true;
+        } catch (err: any) {
+          out.push(
+            `${userId.slice(0, 12)}: stars scan failed: ${err?.message || err}`
+          );
+          userRan = true;
+        }
+      }
+
+      if (ownedDue && ownedWanted) {
+        if (getImportStatus().running) {
+          out.push(`${userId.slice(0, 12)}: owned skipped (import busy)`);
+        } else {
+          try {
+            const result = await scanAndMaybeImportOwned();
+            out.push(`${userId.slice(0, 12)}: ${result.message}`);
+            userRan = true;
+          } catch (err: any) {
+            out.push(
+              `${userId.slice(0, 12)}: owned scan failed: ${err?.message || err}`
+            );
+            userRan = true;
+          }
+        }
+      }
+
+      return { ran: userRan, messages: out };
+    });
+
+    if (userMessages.ran) ran = true;
+    messages.push(...userMessages.messages);
   }
 
   if (ran) {
     const s = state();
     s.lastGithubScanAt = new Date().toISOString();
-    s.lastGithubScanSummary = messages.join('; ');
+    s.lastGithubScanSummary = messages.join('; ') || 'ok';
+  }
+
+  if (messages.length === 0 && !ran) {
+    return { ran: false, messages: ['No GitHub scans due'] };
   }
 
   return { ran, messages };
@@ -256,12 +297,26 @@ export function startScheduler() {
     (s.timer as NodeJS.Timeout).unref?.();
   }
 
-  console.log('[scheduler] started (tick every 60s)');
+  console.log('[scheduler] started (tick every 60s, multi-user)');
 }
 
 export function getSchedulerStatus() {
   const s = state();
-  const settings = getSettings();
+  // Status uses current request user settings when available
+  let settings;
+  try {
+    settings = getSettings();
+  } catch {
+    settings = {
+      auto_sync_enabled: false,
+      sync_interval_hours: 24,
+      auto_scan_stars_enabled: false,
+      auto_import_stars_enabled: false,
+      auto_scan_owned_enabled: false,
+      auto_import_owned_enabled: false,
+      github_scan_interval_hours: 24,
+    };
+  }
   return {
     started: s.started,
     running: s.running,

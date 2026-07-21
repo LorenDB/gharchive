@@ -9,8 +9,11 @@ import {
 import { getMirrorPath, cloneMirror } from '@/lib/git';
 import { parseCloneUrl } from '@/lib/releases';
 import { syncRepo } from '@/lib/sync';
+import { ensureApiAuth } from '@/lib/api-auth';
 
 export async function GET(req: NextRequest) {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   const { repos } = getDb();
   const listIdParam = req.nextUrl.searchParams.get('list_id');
   const listId = listIdParam ? parseInt(listIdParam, 10) : null;
@@ -38,6 +41,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   try {
     const body = await req.json();
     const { clone_url } = body;

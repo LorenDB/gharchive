@@ -5,11 +5,14 @@ import {
   setRepoLists,
   getLists,
 } from '@/lib/db';
+import { ensureApiAuth } from '@/lib/api-auth';
 
 export async function GET(
   _req: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   const id = parseInt(params.id, 10);
   const repo = getDb().repos.find((r) => r.id === id);
   if (!repo) {
@@ -26,6 +29,8 @@ export async function PUT(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   const id = parseInt(params.id, 10);
   const repo = getDb().repos.find((r) => r.id === id);
   if (!repo) {

@@ -1,5 +1,10 @@
 import path from 'path';
 import fs from 'fs';
+import {
+  AUTOLOGIN_USER_ID,
+  safeUserPathSegment,
+  tryGetUserId,
+} from '@/lib/user-context';
 
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const RELEASES_DIR = path.join(DATA_DIR, 'releases');
@@ -157,12 +162,31 @@ export async function downloadReleaseAsset(
   }
 }
 
+/**
+ * On-disk path for a downloaded release asset (mirrors multi-user layout).
+ * - Autologin: `releases/{platform}/{owner}/{repo}/{tag}/{file}`
+ * - SSO: `releases/users/{userId}/{platform}/...`
+ */
 export function getReleaseAssetPath(
   platform: string,
   owner: string,
   repo: string,
   tag: string,
-  filename: string
+  filename: string,
+  userId?: string
 ): string {
-  return path.join(RELEASES_DIR, platform, owner, repo, tag, filename);
+  const uid = userId ?? tryGetUserId() ?? AUTOLOGIN_USER_ID;
+  if (uid === AUTOLOGIN_USER_ID) {
+    return path.join(RELEASES_DIR, platform, owner, repo, tag, filename);
+  }
+  return path.join(
+    RELEASES_DIR,
+    'users',
+    safeUserPathSegment(uid),
+    platform,
+    owner,
+    repo,
+    tag,
+    filename
+  );
 }

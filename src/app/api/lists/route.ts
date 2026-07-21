@@ -5,8 +5,11 @@ import {
   getListCounts,
   LIST_COLORS,
 } from '@/lib/db';
+import { ensureApiAuth } from '@/lib/api-auth';
 
 export async function GET() {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   const lists = getLists();
   const counts = getListCounts();
   return NextResponse.json({
@@ -18,6 +21,8 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   try {
     const body = await req.json();
     const name = typeof body.name === 'string' ? body.name.trim() : '';

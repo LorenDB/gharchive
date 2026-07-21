@@ -2,11 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { getDb, getReleaseAssets } from '@/lib/db';
+import { ensureApiAuth } from '@/lib/api-auth';
 
 export async function GET(
   _req: NextRequest,
   { params }: { params: { id: string; assetId: string } }
 ) {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   const repoId = parseInt(params.id);
   const assetId = parseInt(params.assetId);
   const { repos, releases } = getDb();

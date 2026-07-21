@@ -7,11 +7,14 @@ import {
   getListRepoIds,
   getDb,
 } from '@/lib/db';
+import { ensureApiAuth } from '@/lib/api-auth';
 
 export async function GET(
   _req: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   const id = parseInt(params.id, 10);
   const list = getList(id);
   if (!list) {
@@ -33,6 +36,8 @@ export async function PUT(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   const id = parseInt(params.id, 10);
   if (!getList(id)) {
     return NextResponse.json({ error: 'Not found' }, { status: 404 });
@@ -73,6 +78,8 @@ export async function DELETE(
   _req: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  const denied = await ensureApiAuth();
+  if (denied) return denied;
   const id = parseInt(params.id, 10);
   if (!getList(id)) {
     return NextResponse.json({ error: 'Not found' }, { status: 404 });
