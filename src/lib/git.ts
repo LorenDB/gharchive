@@ -55,6 +55,10 @@ export async function cloneMirror(cloneUrl: string, mirrorPath: string): Promise
   const dir = path.dirname(mirrorPath);
   fs.mkdirSync(dir, { recursive: true });
 
+  if (fs.existsSync(mirrorPath)) {
+    fs.rmSync(mirrorPath, { recursive: true, force: true });
+  }
+
   await run(`git clone --bare --mirror "${cloneUrl}" "${mirrorPath}"`);
   await applyGcProtection(mirrorPath);
 }
