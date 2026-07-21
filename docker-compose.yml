@@ -18,4 +18,12 @@ services:
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
       OIDC_SCOPES: ${OIDC_SCOPES:-openid profile email}
       OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-}
+      # Set to the Apprise API container (auto-fills Settings → Alerts → Apprise API URL)
+      APPRISE_API_URL: ${APPRISE_API_URL:-http://apprise:8000}
+    restart: unless-stopped
+
+  apprise:
+    image: caronc/apprise:latest
+    ports:
+      - '8000:8000'
     restart: unless-stopped

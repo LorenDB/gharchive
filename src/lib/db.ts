@@ -511,7 +511,11 @@ export function getDb() {
 export function getSettings(): Settings {
   const userId = tryGetUserId() ?? AUTOLOGIN_USER_ID;
   const stored = load().settings_by_user[userId];
-  return { ...DEFAULT_SETTINGS, ...(stored || {}) };
+  const settings = { ...DEFAULT_SETTINGS, ...(stored || {}) };
+  if (!settings.apprise_api_url && process.env.APPRISE_API_URL) {
+    settings.apprise_api_url = process.env.APPRISE_API_URL;
+  }
+  return settings;
 }
 
 export function updateSettings(partial: Partial<Settings>): Settings {
