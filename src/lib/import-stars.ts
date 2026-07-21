@@ -26,6 +26,7 @@ import {
   runAsUserAsync,
   tryGetUserId,
 } from '@/lib/user-context';
+import { hasEnoughMemory } from '@/lib/memory';
 
 export interface ImportItem {
   owner: string;
@@ -225,7 +226,18 @@ async function processQueue() {
   }
 
   await runAsUserAsync(userId, async () => {
+    const settings = getSettings();
+
     while (j.queue.length > 0) {
+      if (settings.memory_aware_enabled) {
+        const memCheck = hasEnoughMemory();
+        if (!memCheck.ok) {
+          j.current = `paused (${memCheck.reason})`;
+          await new Promise((r) => setTimeout(r, 30_000));
+          continue;
+        }
+      }
+
       const item = j.queue.shift()!;
       const full = `${item.owner}/${item.name}`;
       j.current = full;

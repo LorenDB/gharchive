@@ -7,6 +7,7 @@ import {
   safeUserPathSegment,
   tryGetUserId,
 } from '@/lib/user-context';
+import { hasEnoughMemory } from '@/lib/memory';
 
 const execAsync = promisify(execCb);
 
@@ -15,6 +16,13 @@ const MIRRORS_DIR = path.join(DATA_DIR, 'mirrors');
 
 function run(cmd: string, cwd?: string): Promise<{ stdout: string; stderr: string }> {
   return execAsync(cmd, { encoding: 'utf8', cwd, maxBuffer: 10 * 1024 * 1024 });
+}
+
+function assertMemory(label: string): void {
+  const check = hasEnoughMemory(128);
+  if (!check.ok) {
+    throw new Error(`Insufficient memory for ${label}: ${check.reason}`);
+  }
 }
 
 /**
@@ -43,6 +51,7 @@ export function getMirrorPath(
 }
 
 export async function cloneMirror(cloneUrl: string, mirrorPath: string): Promise<void> {
+  assertMemory(`clone ${cloneUrl}`);
   const dir = path.dirname(mirrorPath);
   fs.mkdirSync(dir, { recursive: true });
 
@@ -68,6 +77,7 @@ export async function verifyGcProtection(mirrorPath: string): Promise<void> {
 }
 
 export async function syncMirror(mirrorPath: string): Promise<string> {
+  assertMemory(`sync ${mirrorPath}`);
   await verifyGcProtection(mirrorPath);
 
   const timestamp = Math.floor(Date.now() / 1000).toString();

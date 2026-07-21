@@ -17,6 +17,9 @@ interface Settings {
   github_scan_interval_hours: number;
   auto_import_owned_include_forks: boolean;
   auto_import_owned_include_private: boolean;
+  memory_aware_enabled: boolean;
+  min_free_memory_mb: number;
+  max_memory_usage_ratio: number;
 }
 
 interface SchedulerStatus {
@@ -28,6 +31,16 @@ interface SchedulerStatus {
   last_github_scan_summary: string | null;
   auto_sync_enabled: boolean;
   sync_interval_hours: number;
+  memory_aware_enabled?: boolean;
+  memory_info?: {
+    totalMB: number;
+    freeMB: number;
+    usedMB: number;
+    usageRatio: number;
+    cgroupLimited: boolean;
+    heapUsedMB: number;
+  };
+  adjusted_concurrency?: number;
 }
 
 const INTERVAL_LABELS: Record<number, string> = {
@@ -694,6 +707,132 @@ export default function SettingsPage() {
               Assets larger than this are skipped. Use <span className="font-mono">0</span>{' '}
               for no limit.
             </p>
+          </div>
+        </section>
+
+        {/* Memory awareness */}
+        <section className="surface p-5 sm:p-6">
+          <div className="flex items-start justify-between gap-4 mb-5">
+            <div>
+              <h2 className="text-base font-semibold text-white">Memory limits</h2>
+              <p className="hint !mt-1">
+                Dynamically adjust job concurrency and defer heavy operations when system
+                memory is low.
+              </p>
+            </div>
+            <Toggle
+              checked={draft.memory_aware_enabled}
+              onChange={(v) => setDraft({ ...draft, memory_aware_enabled: v })}
+              label="Enable memory-aware scheduling"
+            />
+          </div>
+
+          <div
+            className={`space-y-5 transition-opacity ${
+              draft.memory_aware_enabled
+                ? 'opacity-100'
+                : 'opacity-40 pointer-events-none'
+            }`}
+          >
+            <div>
+              <label className="label" htmlFor="min-free-memory">
+                Minimum free memory (MB)
+              </label>
+              <input
+                id="min-free-memory"
+                type="number"
+                min={64}
+                max={65536}
+                step={64}
+                className="input max-w-[12rem]"
+                value={draft.min_free_memory_mb}
+                onChange={(e) =>
+                  setDraft({
+                    ...draft,
+                    min_free_memory_mb: Math.max(
+                      64,
+                      parseInt(e.target.value || '256', 10)
+                    ),
+                  })
+                }
+              />
+              <p className="hint">
+                New jobs are deferred when free memory drops below this threshold.
+              </p>
+            </div>
+
+            <div>
+              <label className="label" htmlFor="max-memory-ratio">
+                Max memory usage ratio
+              </label>
+              <div className="flex items-center gap-3">
+                <input
+                  id="max-memory-ratio"
+                  type="range"
+                  min={0.5}
+                  max={1}
+                  step={0.05}
+                  className="w-48"
+                  value={draft.max_memory_usage_ratio}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      max_memory_usage_ratio: parseFloat(e.target.value),
+                    })
+                  }
+                />
+                <span className="font-mono text-sm text-ink-300 tabular-nums w-10">
+                  {Math.round(draft.max_memory_usage_ratio * 100)}%
+                </span>
+              </div>
+              <p className="hint">
+                Jobs are paused when total memory usage exceeds this fraction of
+                available RAM (including cgroup limits in Docker).
+              </p>
+            </div>
+
+            {scheduler?.memory_info && (
+              <div className="rounded-lg border border-ink-800 bg-ink-950/40 p-4">
+                <p className="text-xs text-ink-500 mb-2 uppercase tracking-wide">
+                  Current memory
+                </p>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+                  <div>
+                    <span className="text-ink-500">Total</span>
+                    <br />
+                    <span className="font-mono tabular-nums">
+                      {scheduler.memory_info.totalMB} MB
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-ink-500">Free</span>
+                    <br />
+                    <span className="font-mono tabular-nums">
+                      {scheduler.memory_info.freeMB} MB
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-ink-500">Heap</span>
+                    <br />
+                    <span className="font-mono tabular-nums">
+                      {scheduler.memory_info.heapUsedMB} MB
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-ink-500">Effective concurrency</span>
+                    <br />
+                    <span className="font-mono tabular-nums">
+                      {scheduler.adjusted_concurrency ?? draft.concurrent_syncs}
+                    </span>
+                  </div>
+                </div>
+                {scheduler.memory_info.cgroupLimited && (
+                  <p className="text-xs text-amber-400/70 mt-2">
+                    Running under a cgroup memory limit (Docker/container).
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         </section>
 

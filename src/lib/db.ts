@@ -30,6 +30,12 @@ export interface Settings {
   auto_import_owned_include_forks: boolean;
   /** Include private repos when scanning owned repositories */
   auto_import_owned_include_private: boolean;
+  /** Dynamically adjust job concurrency based on available memory */
+  memory_aware_enabled: boolean;
+  /** Minimum free memory in MB before starting new jobs */
+  min_free_memory_mb: number;
+  /** Maximum allowed memory usage ratio (0-1) before deferring work */
+  max_memory_usage_ratio: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -45,6 +51,9 @@ export const DEFAULT_SETTINGS: Settings = {
   github_scan_interval_hours: 24,
   auto_import_owned_include_forks: false,
   auto_import_owned_include_private: true,
+  memory_aware_enabled: true,
+  min_free_memory_mb: 256,
+  max_memory_usage_ratio: 0.8,
 };
 
 export interface GithubAccount {

@@ -117,6 +117,33 @@ export async function PUT(req: NextRequest) {
         patch.github_scan_interval_hours = n;
       }
 
+      // Memory-aware settings
+      if (typeof body.memory_aware_enabled === 'boolean') {
+        patch.memory_aware_enabled = body.memory_aware_enabled;
+      }
+
+      if (body.min_free_memory_mb !== undefined) {
+        const n = Number(body.min_free_memory_mb);
+        if (!Number.isFinite(n) || n < 64 || n > 65536) {
+          return NextResponse.json(
+            { error: 'min_free_memory_mb must be between 64 and 65536' },
+            { status: 400 }
+          );
+        }
+        patch.min_free_memory_mb = Math.round(n);
+      }
+
+      if (body.max_memory_usage_ratio !== undefined) {
+        const n = Number(body.max_memory_usage_ratio);
+        if (!Number.isFinite(n) || n < 0.1 || n > 1) {
+          return NextResponse.json(
+            { error: 'max_memory_usage_ratio must be between 0.1 and 1' },
+            { status: 400 }
+          );
+        }
+        patch.max_memory_usage_ratio = Math.round(n * 100) / 100;
+      }
+
       const settings = updateSettings(patch);
       return NextResponse.json({
         settings,

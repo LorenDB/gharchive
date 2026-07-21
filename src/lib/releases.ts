@@ -5,6 +5,7 @@ import {
   safeUserPathSegment,
   tryGetUserId,
 } from '@/lib/user-context';
+import { hasEnoughMemory } from '@/lib/memory';
 
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const RELEASES_DIR = path.join(DATA_DIR, 'releases');
@@ -144,6 +145,12 @@ export async function downloadReleaseAsset(
   destPath: string
 ): Promise<boolean> {
   try {
+    const memCheck = hasEnoughMemory(64);
+    if (!memCheck.ok) {
+      console.warn(`[releases] skipping asset download (${memCheck.reason}): ${url}`);
+      return false;
+    }
+
     const dir = path.dirname(destPath);
     fs.mkdirSync(dir, { recursive: true });
 

@@ -1,6 +1,7 @@
 import { getSettings, listUserIds } from '@/lib/db';
 import { getGithubAccount, getGithubToken } from '@/lib/db';
 import { getDb } from '@/lib/db';
+import type { Settings } from '@/lib/db';
 import { syncRepo } from '@/lib/sync';
 import {
   scanAndMaybeImportStars,
@@ -8,6 +9,7 @@ import {
   getImportStatus,
 } from '@/lib/import-stars';
 import { runAsUserAsync } from '@/lib/user-context';
+import { hasEnoughMemory, getAdjustedConcurrency, getMemoryInfo } from '@/lib/memory';
 
 /** Check due work every minute; cadences come from per-user settings. */
 const TICK_MS = 60_000;
@@ -123,7 +125,18 @@ export async function runScheduledSync(
         let uSynced = 0;
         let uFailed = 0;
 
-        await mapPool(due, settings.concurrent_syncs, async (repo) => {
+        const adjustedConcurrency = getAdjustedConcurrency(settings.concurrent_syncs);
+        if (adjustedConcurrency < 1 && due.length > 0) {
+          return {
+            synced: 0,
+            failed: 0,
+            skipped: repos.length,
+            due: due.length,
+            note: `deferred (low memory)`,
+          };
+        }
+
+        await mapPool(due, adjustedConcurrency, async (repo) => {
           try {
             const result = await syncRepo(repo);
             if (result.ok) uSynced++;
@@ -264,6 +277,12 @@ export async function runScheduledGithubScan(
 }
 
 async function tick() {
+  const memCheck = hasEnoughMemory();
+  if (!memCheck.ok) {
+    console.log(`[scheduler] skipped tick: ${memCheck.reason}`);
+    return;
+  }
+
   try {
     const result = await runScheduledSync(false);
     if (result.ran) {
@@ -303,18 +322,26 @@ export function startScheduler() {
 export function getSchedulerStatus() {
   const s = state();
   // Status uses current request user settings when available
-  let settings;
+  let settings: Settings;
   try {
     settings = getSettings();
   } catch {
     settings = {
       auto_sync_enabled: false,
       sync_interval_hours: 24,
+      download_release_assets: true,
+      max_asset_size_mb: 500,
+      concurrent_syncs: 4,
       auto_scan_stars_enabled: false,
       auto_import_stars_enabled: false,
       auto_scan_owned_enabled: false,
       auto_import_owned_enabled: false,
       github_scan_interval_hours: 24,
+      auto_import_owned_include_forks: false,
+      auto_import_owned_include_private: true,
+      memory_aware_enabled: true,
+      min_free_memory_mb: 256,
+      max_memory_usage_ratio: 0.8,
     };
   }
   return {
@@ -331,5 +358,8 @@ export function getSchedulerStatus() {
     auto_scan_owned_enabled: settings.auto_scan_owned_enabled,
     auto_import_owned_enabled: settings.auto_import_owned_enabled,
     github_scan_interval_hours: settings.github_scan_interval_hours,
+    memory_aware_enabled: settings.memory_aware_enabled,
+    memory_info: getMemoryInfo(),
+    adjusted_concurrency: getAdjustedConcurrency(settings.concurrent_syncs),
   };
 }

@@ -14,6 +14,7 @@ import {
   downloadReleaseAsset,
   getReleaseAssetPath,
 } from '@/lib/releases';
+import { hasEnoughMemory } from '@/lib/memory';
 
 export interface RepoLike {
   id: number;
@@ -35,6 +36,16 @@ export async function syncRepo(
   const settings = getSettings();
 
   if (!options.skipGit) {
+    const memCheck = hasEnoughMemory();
+    if (!memCheck.ok) {
+      addSyncLog({
+        repo_id: repo.id,
+        status: 'failed',
+        message: `sync deferred (low memory): ${memCheck.reason}`,
+      });
+      return { ok: false, messages, error: `Low memory: ${memCheck.reason}` };
+    }
+
     try {
       const gitMsg = await syncMirror(repo.mirror_path);
       messages.push(`git: ${gitMsg || 'up to date'}`);
@@ -99,6 +110,15 @@ export async function syncRepo(
         } else if (tooLarge) {
           skippedAssets++;
         } else if (asset.download_url) {
+          if (asset.size > 10 * 1024 * 1024) {
+            const assetMemCheck = hasEnoughMemory(
+              Math.ceil(asset.size / 1024 / 1024) + settings.min_free_memory_mb
+            );
+            if (!assetMemCheck.ok) {
+              skippedAssets++;
+              continue;
+            }
+          }
           downloaded = await downloadReleaseAsset(asset.download_url, assetPath);
         }
 
