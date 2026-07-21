@@ -1,0 +1,12 @@
+services:
+  gharchive:
+    build: .
+    ports:
+      - '3000:3000'
+    volumes:
+      - ./data:/data
+    environment:
+      - DATA_DIR=/data
+      - GITHUB_TOKEN=
+      - GITLAB_TOKEN=
+    restart: unless-stopped
