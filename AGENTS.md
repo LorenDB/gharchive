@@ -41,3 +41,16 @@ You may still run:
 - Settings: auto-sync interval, asset download limits
 - Lists/tags (local + imported from GitHub star lists)
 - Import starred repos segmented by GitHub lists (`/import`)
+- Alerts via [Apprise API](https://github.com/caronc/apprise-api): major archive
+  events (new release, releases wiped, history wiped, repo deleted) and system
+  events (storage low, memory low). Configure under Settings → Alerts.
+
+## Alerts (Apprise)
+
+- Requires a reachable Apprise API base URL (`apprise_api_url`)
+- Stateless: one or more Apprise service URLs in settings
+- Stateful: optional `apprise_config_key` → `POST /notify/{key}`
+- Categories are optional Apprise tags when “Use category tags” is on:
+  `new_release`, `releases_wiped`, `history_wiped`, `repo_deleted`,
+  `sync_failed`, `storage_low`, `memory_low`
+- Test: `POST /api/alerts/test` with `{ "category": "new_release" }`

@@ -76,32 +76,180 @@ export async function verifyGcProtection(mirrorPath: string): Promise<void> {
   await applyGcProtection(mirrorPath);
 }
 
-export async function syncMirror(mirrorPath: string): Promise<string> {
+export interface MirrorSyncResult {
+  message: string;
+  /** True when remote appears gone (404 / not found). */
+  repoDeleted: boolean;
+  /** True when history was force-rewritten or heads/tags mass-deleted. */
+  historyWiped: boolean;
+  historyDetails: string[];
+}
+
+export async function syncMirror(mirrorPath: string): Promise<MirrorSyncResult> {
   assertMemory(`sync ${mirrorPath}`);
   await verifyGcProtection(mirrorPath);
 
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const snapshotNs = `refs/archive/${timestamp}`;
 
-  try {
-    const { stdout: refs } = await run(
-      `git -C "${mirrorPath}" for-each-ref --format='%(refname)' refs/heads/ refs/tags/`
-    );
+  const beforeHeads = await listRefTips(mirrorPath, 'refs/heads/');
+  const beforeTags = await listRefTips(mirrorPath, 'refs/tags/');
 
-    const refList = refs.trim().split('\n').filter(Boolean);
+  try {
+    const refList = [
+      ...Object.keys(beforeHeads).map((n) => `refs/heads/${n}`),
+      ...Object.keys(beforeTags).map((n) => `refs/tags/${n}`),
+    ];
     for (const ref of refList) {
       const shortRef = ref.replace(/^refs\//, '');
-      await run(`git -C "${mirrorPath}" update-ref "${snapshotNs}/${shortRef}" "${ref}"`);
+      try {
+        await run(`git -C "${mirrorPath}" update-ref "${snapshotNs}/${shortRef}" "${ref}"`);
+      } catch {
+        // skip individual ref snapshot failures
+      }
     }
   } catch {
     // no refs to snapshot (e.g. empty repo)
   }
 
-  const { stdout, stderr } = await run(
-    `git -C "${mirrorPath}" fetch origin '+refs/*:refs/*'`
-  );
+  let stdout = '';
+  let stderr = '';
+  try {
+    const result = await run(
+      `git -C "${mirrorPath}" fetch origin '+refs/*:refs/*'`
+    );
+    stdout = result.stdout;
+    stderr = result.stderr;
+  } catch (err: any) {
+    const msg = `${err?.stderr || ''}\n${err?.stdout || ''}\n${err?.message || err}`;
+    if (isRemoteMissingError(msg)) {
+      return {
+        message: msg.trim() || 'remote repository not found',
+        repoDeleted: true,
+        historyWiped: false,
+        historyDetails: [],
+      };
+    }
+    throw err;
+  }
 
-  return `${stdout}\n${stderr}`.trim();
+  const afterHeads = await listRefTips(mirrorPath, 'refs/heads/');
+  const history = await detectHistoryWipe(mirrorPath, beforeHeads, afterHeads, beforeTags);
+
+  return {
+    message: `${stdout}\n${stderr}`.trim(),
+    repoDeleted: false,
+    historyWiped: history.wiped,
+    historyDetails: history.details,
+  };
+}
+
+/** Map short ref name → tip SHA for a refs namespace. */
+async function listRefTips(
+  mirrorPath: string,
+  prefix: string
+): Promise<Record<string, string>> {
+  try {
+    const { stdout } = await run(
+      `git -C "${mirrorPath}" for-each-ref --format='%(refname:short)%09%(objectname)' ${prefix}`
+    );
+    const out: Record<string, string> = {};
+    for (const line of stdout.trim().split('\n').filter(Boolean)) {
+      const [name, sha] = line.split('\t');
+      if (name && sha) out[name] = sha;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+async function detectHistoryWipe(
+  mirrorPath: string,
+  beforeHeads: Record<string, string>,
+  afterHeads: Record<string, string>,
+  beforeTags: Record<string, string>
+): Promise<{ wiped: boolean; details: string[] }> {
+  const details: string[] = [];
+  const beforeNames = Object.keys(beforeHeads);
+  if (beforeNames.length === 0) {
+    return { wiped: false, details: [] };
+  }
+
+  // Force-push / non-fast-forward: old tip is not an ancestor of new tip
+  let rewritten = 0;
+  for (const name of beforeNames) {
+    const oldSha = beforeHeads[name];
+    const newSha = afterHeads[name];
+    if (!newSha) continue;
+    if (oldSha === newSha) continue;
+    try {
+      await run(
+        `git -C "${mirrorPath}" merge-base --is-ancestor "${oldSha}" "${newSha}"`
+      );
+      // exit 0 → fast-forward / normal advance
+    } catch {
+      rewritten++;
+      details.push(
+        `branch ${name}: non-fast-forward (${oldSha.slice(0, 8)} → ${newSha.slice(0, 8)})`
+      );
+    }
+  }
+
+  // Mass branch deletion
+  const afterNames = Object.keys(afterHeads);
+  const deletedHeads = beforeNames.filter((n) => !afterHeads[n]);
+  if (
+    beforeNames.length >= 2 &&
+    deletedHeads.length >= Math.max(2, Math.ceil(beforeNames.length * 0.5))
+  ) {
+    details.push(
+      `branches deleted: ${deletedHeads.length}/${beforeNames.length} (${deletedHeads.slice(0, 8).join(', ')}${deletedHeads.length > 8 ? '…' : ''})`
+    );
+  }
+
+  // All heads gone while we had some
+  if (beforeNames.length > 0 && afterNames.length === 0) {
+    details.push(`all ${beforeNames.length} branch tip(s) removed upstream`);
+  }
+
+  // Mass tag deletion (only if we had a meaningful set)
+  const beforeTagNames = Object.keys(beforeTags);
+  if (beforeTagNames.length >= 5) {
+    const afterTags = await listRefTips(mirrorPath, 'refs/tags/');
+    const deletedTags = beforeTagNames.filter((n) => !afterTags[n]);
+    if (deletedTags.length >= Math.ceil(beforeTagNames.length * 0.5)) {
+      details.push(
+        `tags deleted: ${deletedTags.length}/${beforeTagNames.length}`
+      );
+    }
+  }
+
+  const wiped =
+    rewritten > 0 ||
+    details.some((d) => d.startsWith('branches deleted') || d.startsWith('all '));
+
+  // Tag mass-delete alone is also a history wipe signal
+  const tagWipe = details.some((d) => d.startsWith('tags deleted'));
+  return { wiped: wiped || tagWipe, details };
+}
+
+/** Heuristic: remote repo gone / access revoked. */
+export function isRemoteMissingError(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    m.includes('repository not found') ||
+    m.includes('remote: not found') ||
+    m.includes('does not exist') ||
+    m.includes('could not read from remote') ||
+    m.includes('remote repository not found') ||
+    /\bfatal:.*not found\b/.test(m) ||
+    m.includes('the requested url returned error: 404') ||
+    m.includes('http 404') ||
+    m.includes('status code 404') ||
+    m.includes('project not found') ||
+    m.includes('404 not found')
+  );
 }
 
 export async function deleteMirror(mirrorPath: string): Promise<void> {

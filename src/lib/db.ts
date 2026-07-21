@@ -36,6 +36,50 @@ export interface Settings {
   min_free_memory_mb: number;
   /** Maximum allowed memory usage ratio (0-1) before deferring work */
   max_memory_usage_ratio: number;
+
+  // ── Alerts (Apprise) ──────────────────────────────────────────
+  /** Master switch for outbound alerts */
+  alerts_enabled: boolean;
+  /**
+   * Apprise API base URL (e.g. http://apprise:8000).
+   * Required to send notifications over HTTP.
+   */
+  apprise_api_url: string;
+  /**
+   * Optional stateful config key. When set, posts to /notify/{key}.
+   * When empty, uses stateless /notify with apprise_urls.
+   */
+  apprise_config_key: string;
+  /**
+   * Apprise notification URLs for stateless mode (or fallback when no key).
+   * e.g. discord://id/token, tgram://bot/chat, mailto://...
+   */
+  apprise_urls: string[];
+  /**
+   * When true, send the alert category as an Apprise `tag` so URLs can be
+   * routed by category in Apprise configuration.
+   */
+  apprise_use_tags: boolean;
+
+  /** Alert when a new release tag is discovered */
+  alert_new_release: boolean;
+  /** Alert when remote releases disappear (were archived, now empty) */
+  alert_releases_wiped: boolean;
+  /** Alert when git history is force-rewritten or mass-deleted */
+  alert_history_wiped: boolean;
+  /** Alert when the remote repository is gone (404 / not found) */
+  alert_repo_deleted: boolean;
+  /** Alert when a repo sync fails for other reasons */
+  alert_sync_failed: boolean;
+  /** Alert when DATA_DIR disk usage is high / free space is low */
+  alert_storage_low: boolean;
+  /** Alert when system/cgroup memory is critically low */
+  alert_memory_low: boolean;
+
+  /** Disk usage % above which storage_low fires (1–100) */
+  storage_alert_threshold_percent: number;
+  /** Free disk MB below which storage_low fires */
+  storage_alert_min_free_mb: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -54,6 +98,23 @@ export const DEFAULT_SETTINGS: Settings = {
   memory_aware_enabled: true,
   min_free_memory_mb: 256,
   max_memory_usage_ratio: 0.8,
+
+  alerts_enabled: false,
+  apprise_api_url: '',
+  apprise_config_key: '',
+  apprise_urls: [],
+  apprise_use_tags: false,
+
+  alert_new_release: true,
+  alert_releases_wiped: true,
+  alert_history_wiped: true,
+  alert_repo_deleted: true,
+  alert_sync_failed: false,
+  alert_storage_low: true,
+  alert_memory_low: true,
+
+  storage_alert_threshold_percent: 90,
+  storage_alert_min_free_mb: 1024,
 };
 
 export interface GithubAccount {

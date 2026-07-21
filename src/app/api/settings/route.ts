@@ -13,8 +13,27 @@ import {
 } from '@/lib/scheduler';
 import { withApiUser } from '@/lib/api-auth';
 import { getRequiredUserId } from '@/lib/user-context';
+import {
+  ALERT_CATEGORIES,
+  ALERT_CATEGORY_META,
+  isAlertsConfigured,
+  type AlertCategory,
+} from '@/lib/alerts';
+import { getDiskInfo } from '@/lib/disk';
 
 const INTERVAL_OPTIONS = [1, 6, 12, 24, 48, 168] as const;
+
+const ALERT_BOOL_KEYS = [
+  'alerts_enabled',
+  'apprise_use_tags',
+  'alert_new_release',
+  'alert_releases_wiped',
+  'alert_history_wiped',
+  'alert_repo_deleted',
+  'alert_sync_failed',
+  'alert_storage_low',
+  'alert_memory_low',
+] as const;
 
 startScheduler();
 
@@ -29,13 +48,56 @@ function parseHours(
   return Math.round(n);
 }
 
+function parseAppriseUrls(value: unknown): string[] | { error: string } {
+  if (value === undefined || value === null) return [];
+  let lines: string[] = [];
+  if (typeof value === 'string') {
+    lines = value.split(/[\n,]+/);
+  } else if (Array.isArray(value)) {
+    lines = value.map((v) => String(v));
+  } else {
+    return { error: 'apprise_urls must be a string or array' };
+  }
+  const urls = lines.map((u) => u.trim()).filter(Boolean);
+  if (urls.length > 50) {
+    return { error: 'apprise_urls: at most 50 URLs' };
+  }
+  for (const u of urls) {
+    if (u.length > 2000) {
+      return { error: 'apprise_urls: URL too long' };
+    }
+    // Apprise URLs are scheme://... — allow anything with ://
+    if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u)) {
+      return {
+        error: `apprise_urls: invalid URL (expected scheme://…): ${u.slice(0, 60)}`,
+      };
+    }
+  }
+  return urls;
+}
+
 export async function GET() {
   return withApiUser(async () => {
+    const settings = getSettings();
+    let disk = null;
+    try {
+      disk = await getDiskInfo();
+    } catch {
+      disk = null;
+    }
     return NextResponse.json({
-      settings: getSettings(),
+      settings,
       defaults: DEFAULT_SETTINGS,
       interval_options: INTERVAL_OPTIONS,
       scheduler: getSchedulerStatus(),
+      alerts: {
+        configured: isAlertsConfigured(settings),
+        categories: ALERT_CATEGORIES.map((id) => ({
+          id,
+          ...ALERT_CATEGORY_META[id as AlertCategory],
+        })),
+      },
+      disk,
     });
   });
 }
@@ -144,10 +206,100 @@ export async function PUT(req: NextRequest) {
         patch.max_memory_usage_ratio = Math.round(n * 100) / 100;
       }
 
+      // Alerts / Apprise
+      for (const key of ALERT_BOOL_KEYS) {
+        if (typeof body[key] === 'boolean') {
+          patch[key] = body[key];
+        }
+      }
+
+      if (body.apprise_api_url !== undefined) {
+        if (typeof body.apprise_api_url !== 'string') {
+          return NextResponse.json(
+            { error: 'apprise_api_url must be a string' },
+            { status: 400 }
+          );
+        }
+        const u = body.apprise_api_url.trim();
+        if (u && !/^https?:\/\//i.test(u)) {
+          return NextResponse.json(
+            { error: 'apprise_api_url must start with http:// or https://' },
+            { status: 400 }
+          );
+        }
+        if (u.length > 500) {
+          return NextResponse.json(
+            { error: 'apprise_api_url too long' },
+            { status: 400 }
+          );
+        }
+        patch.apprise_api_url = u;
+      }
+
+      if (body.apprise_config_key !== undefined) {
+        if (typeof body.apprise_config_key !== 'string') {
+          return NextResponse.json(
+            { error: 'apprise_config_key must be a string' },
+            { status: 400 }
+          );
+        }
+        const k = body.apprise_config_key.trim();
+        if (k && !/^[a-zA-Z0-9_-]{1,128}$/.test(k)) {
+          return NextResponse.json(
+            {
+              error:
+                'apprise_config_key must be 1–128 alphanumeric characters (plus _ -)',
+            },
+            { status: 400 }
+          );
+        }
+        patch.apprise_config_key = k;
+      }
+
+      if (body.apprise_urls !== undefined) {
+        const urls = parseAppriseUrls(body.apprise_urls);
+        if (!Array.isArray(urls)) {
+          return NextResponse.json(urls, { status: 400 });
+        }
+        patch.apprise_urls = urls;
+      }
+
+      if (body.storage_alert_threshold_percent !== undefined) {
+        const n = Number(body.storage_alert_threshold_percent);
+        if (!Number.isFinite(n) || n < 50 || n > 100) {
+          return NextResponse.json(
+            {
+              error:
+                'storage_alert_threshold_percent must be between 50 and 100',
+            },
+            { status: 400 }
+          );
+        }
+        patch.storage_alert_threshold_percent = Math.round(n);
+      }
+
+      if (body.storage_alert_min_free_mb !== undefined) {
+        const n = Number(body.storage_alert_min_free_mb);
+        if (!Number.isFinite(n) || n < 0 || n > 1024 * 1024) {
+          return NextResponse.json(
+            { error: 'storage_alert_min_free_mb must be between 0 and 1048576' },
+            { status: 400 }
+          );
+        }
+        patch.storage_alert_min_free_mb = Math.round(n);
+      }
+
       const settings = updateSettings(patch);
       return NextResponse.json({
         settings,
         scheduler: getSchedulerStatus(),
+        alerts: {
+          configured: isAlertsConfigured(settings),
+          categories: ALERT_CATEGORIES.map((id) => ({
+            id,
+            ...ALERT_CATEGORY_META[id as AlertCategory],
+          })),
+        },
       });
     } catch (err: any) {
       return NextResponse.json({ error: err.message }, { status: 400 });

@@ -20,6 +20,20 @@ interface Settings {
   memory_aware_enabled: boolean;
   min_free_memory_mb: number;
   max_memory_usage_ratio: number;
+  alerts_enabled: boolean;
+  apprise_api_url: string;
+  apprise_config_key: string;
+  apprise_urls: string[];
+  apprise_use_tags: boolean;
+  alert_new_release: boolean;
+  alert_releases_wiped: boolean;
+  alert_history_wiped: boolean;
+  alert_repo_deleted: boolean;
+  alert_sync_failed: boolean;
+  alert_storage_low: boolean;
+  alert_memory_low: boolean;
+  storage_alert_threshold_percent: number;
+  storage_alert_min_free_mb: number;
 }
 
 interface SchedulerStatus {
@@ -41,7 +55,68 @@ interface SchedulerStatus {
     heapUsedMB: number;
   };
   adjusted_concurrency?: number;
+  alerts_enabled?: boolean;
+  alerts_configured?: boolean;
 }
+
+interface DiskInfo {
+  path: string;
+  totalMB: number;
+  freeMB: number;
+  usedMB: number;
+  usageRatio: number;
+  available: boolean;
+}
+
+const ALERT_CATEGORY_ROWS: {
+  key: keyof Settings;
+  label: string;
+  description: string;
+  group: 'archive' | 'system';
+}[] = [
+  {
+    key: 'alert_new_release',
+    label: 'New release',
+    description: 'A new release tag was published and archived.',
+    group: 'archive',
+  },
+  {
+    key: 'alert_releases_wiped',
+    label: 'Releases wiped',
+    description: 'Remote releases disappeared (archive had some; upstream now none).',
+    group: 'archive',
+  },
+  {
+    key: 'alert_history_wiped',
+    label: 'History wiped',
+    description: 'Git history force-rewritten or branches/tags mass-deleted upstream.',
+    group: 'archive',
+  },
+  {
+    key: 'alert_repo_deleted',
+    label: 'Repo deleted',
+    description: 'Remote repository is gone or inaccessible (404 / not found).',
+    group: 'archive',
+  },
+  {
+    key: 'alert_sync_failed',
+    label: 'Sync failed',
+    description: 'A repository sync failed for a non-deletion reason.',
+    group: 'archive',
+  },
+  {
+    key: 'alert_storage_low',
+    label: 'Storage low',
+    description: 'DATA_DIR disk usage is high or free space is below the threshold.',
+    group: 'system',
+  },
+  {
+    key: 'alert_memory_low',
+    label: 'Memory low',
+    description: 'System or cgroup memory is critically low; jobs may be deferred.',
+    group: 'system',
+  },
+];
 
 const INTERVAL_LABELS: Record<number, string> = {
   1: 'Every hour',
@@ -74,6 +149,10 @@ export default function SettingsPage() {
   const [ghToken, setGhToken] = useState('');
   const [ghBusy, setGhBusy] = useState(false);
   const [scanBusy, setScanBusy] = useState<'stars' | 'owned' | 'both' | null>(null);
+  const [disk, setDisk] = useState<DiskInfo | null>(null);
+  const [alertsConfigured, setAlertsConfigured] = useState(false);
+  const [testBusy, setTestBusy] = useState(false);
+  const [appriseUrlsText, setAppriseUrlsText] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -84,8 +163,11 @@ export default function SettingsPage() {
       const data = await res.json();
       setSettings(data.settings);
       setDraft(data.settings);
+      setAppriseUrlsText((data.settings?.apprise_urls || []).join('\n'));
       setIntervals(data.interval_options || [1, 6, 12, 24, 48, 168]);
       setScheduler(data.scheduler);
+      setDisk(data.disk || null);
+      setAlertsConfigured(Boolean(data.alerts?.configured));
       if (ghRes.ok) {
         const gh = await ghRes.json();
         setGhAccount(gh.account);
@@ -141,31 +223,91 @@ export default function SettingsPage() {
     load();
   }, [load]);
 
+  const urlsDirty =
+    draft != null &&
+    appriseUrlsText
+      .split(/[\n,]+/)
+      .map((u) => u.trim())
+      .filter(Boolean)
+      .join('\n') !== (draft.apprise_urls || []).join('\n');
+
   const dirty =
-    draft &&
-    settings &&
-    JSON.stringify(draft) !== JSON.stringify(settings);
+    (draft &&
+      settings &&
+      JSON.stringify(draft) !== JSON.stringify(settings)) ||
+    urlsDirty;
 
   async function save() {
     if (!draft) return;
     setSaving(true);
     setMessage(null);
     try {
+      const payload = {
+        ...draft,
+        apprise_urls: appriseUrlsText
+          .split(/[\n,]+/)
+          .map((u) => u.trim())
+          .filter(Boolean),
+      };
       const res = await fetch('/api/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(draft),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Save failed');
       setSettings(data.settings);
       setDraft(data.settings);
+      setAppriseUrlsText((data.settings?.apprise_urls || []).join('\n'));
       setScheduler(data.scheduler);
+      setAlertsConfigured(Boolean(data.alerts?.configured));
       setMessage({ type: 'ok', text: 'Settings saved' });
     } catch (err: any) {
       setMessage({ type: 'err', text: err.message });
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function sendTestAlert() {
+    setTestBusy(true);
+    setMessage(null);
+    try {
+      // Persist draft first so the test uses current form values
+      if (draft && dirty) {
+        const payload = {
+          ...draft,
+          apprise_urls: appriseUrlsText
+            .split(/[\n,]+/)
+            .map((u) => u.trim())
+            .filter(Boolean),
+        };
+        const saveRes = await fetch('/api/settings', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const saveData = await saveRes.json();
+        if (!saveRes.ok) throw new Error(saveData.error || 'Save failed before test');
+        setSettings(saveData.settings);
+        setDraft(saveData.settings);
+        setAppriseUrlsText((saveData.settings?.apprise_urls || []).join('\n'));
+        setScheduler(saveData.scheduler);
+        setAlertsConfigured(Boolean(saveData.alerts?.configured));
+      }
+
+      const res = await fetch('/api/alerts/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category: 'new_release' }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Test failed');
+      setMessage({ type: 'ok', text: data.message || 'Test alert sent' });
+    } catch (err: any) {
+      setMessage({ type: 'err', text: err.message });
+    } finally {
+      setTestBusy(false);
     }
   }
 
@@ -833,6 +975,299 @@ export default function SettingsPage() {
                 )}
               </div>
             )}
+          </div>
+        </section>
+
+        {/* Alerts / Apprise */}
+        <section className="surface p-5 sm:p-6">
+          <div className="flex items-start justify-between gap-4 mb-5">
+            <div>
+              <h2 className="text-base font-semibold text-white">Alerts (Apprise)</h2>
+              <p className="hint !mt-1">
+                Notify Discord, Telegram, email, and{' '}
+                <a
+                  href="https://github.com/caronc/apprise#supported-notifications"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-amber-400 hover:text-amber-300 underline underline-offset-2"
+                >
+                  100+ other services
+                </a>{' '}
+                via an{' '}
+                <a
+                  href="https://github.com/caronc/apprise-api"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-amber-400 hover:text-amber-300 underline underline-offset-2"
+                >
+                  Apprise API
+                </a>{' '}
+                instance when major archive or system events occur.
+              </p>
+            </div>
+            <Toggle
+              checked={draft.alerts_enabled}
+              onChange={(v) => setDraft({ ...draft, alerts_enabled: v })}
+              label="Enable alerts"
+            />
+          </div>
+
+          <div
+            className={`space-y-5 transition-opacity ${
+              draft.alerts_enabled ? 'opacity-100' : 'opacity-40 pointer-events-none'
+            }`}
+          >
+            <div>
+              <label className="label" htmlFor="apprise-api-url">
+                Apprise API URL
+              </label>
+              <input
+                id="apprise-api-url"
+                type="url"
+                className="input font-mono text-[13px]"
+                value={draft.apprise_api_url}
+                onChange={(e) =>
+                  setDraft({ ...draft, apprise_api_url: e.target.value })
+                }
+                placeholder="http://apprise:8000"
+                autoComplete="off"
+              />
+              <p className="hint">
+                Base URL of your Apprise API container (no trailing path). Example:{' '}
+                <span className="font-mono">http://apprise:8000</span>
+              </p>
+            </div>
+
+            <div>
+              <label className="label" htmlFor="apprise-config-key">
+                Config key (optional)
+              </label>
+              <input
+                id="apprise-config-key"
+                type="text"
+                className="input font-mono text-[13px] max-w-xs"
+                value={draft.apprise_config_key}
+                onChange={(e) =>
+                  setDraft({ ...draft, apprise_config_key: e.target.value })
+                }
+                placeholder="apprise"
+                autoComplete="off"
+              />
+              <p className="hint">
+                When set, notifications go to{' '}
+                <span className="font-mono">/notify/&#123;key&#125;</span> using URLs
+                stored in Apprise. Leave empty to use stateless mode with the URLs
+                below.
+              </p>
+            </div>
+
+            <div>
+              <label className="label" htmlFor="apprise-urls">
+                Apprise URLs (stateless)
+              </label>
+              <textarea
+                id="apprise-urls"
+                className="input font-mono text-[13px] min-h-[5.5rem] resize-y"
+                value={appriseUrlsText}
+                onChange={(e) => setAppriseUrlsText(e.target.value)}
+                placeholder={
+                  'discord://webhook_id/webhook_token\ntgram://bottoken/ChatID\nmailto://user:pass@smtp.example.com'
+                }
+                spellCheck={false}
+              />
+              <p className="hint">
+                One URL per line. Used when no config key is set. See{' '}
+                <a
+                  href="https://github.com/caronc/apprise/wiki"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-amber-400 hover:text-amber-300 underline underline-offset-2"
+                >
+                  Apprise wiki
+                </a>{' '}
+                for URL formats.
+              </p>
+            </div>
+
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-sm font-medium text-ink-200">Use category tags</p>
+                <p className="hint !mt-1">
+                  Pass the alert category as an Apprise <span className="font-mono">tag</span>{' '}
+                  so destinations can be filtered (e.g. only critical events to PagerDuty).
+                  Tag names match the category ids below (
+                  <span className="font-mono">new_release</span>,{' '}
+                  <span className="font-mono">storage_low</span>, …).
+                </p>
+              </div>
+              <Toggle
+                checked={draft.apprise_use_tags}
+                onChange={(v) => setDraft({ ...draft, apprise_use_tags: v })}
+                label="Use Apprise tags"
+              />
+            </div>
+
+            <div>
+              <p className="label mb-2">Archive events</p>
+              <div className="rounded-lg border border-ink-800 bg-ink-950/40 divide-y divide-ink-800/80">
+                {ALERT_CATEGORY_ROWS.filter((r) => r.group === 'archive').map((row) => (
+                  <div
+                    key={row.key}
+                    className="flex items-start justify-between gap-4 px-4 py-3"
+                  >
+                    <div>
+                      <p className="text-sm font-medium text-ink-100">{row.label}</p>
+                      <p className="hint !mt-0.5">{row.description}</p>
+                      <p className="text-[11px] font-mono text-ink-600 mt-0.5">
+                        tag: {row.key.replace(/^alert_/, '')}
+                      </p>
+                    </div>
+                    <Toggle
+                      checked={Boolean(draft[row.key])}
+                      onChange={(v) => setDraft({ ...draft, [row.key]: v })}
+                      label={row.label}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <p className="label mb-2">System events</p>
+              <div className="rounded-lg border border-ink-800 bg-ink-950/40 divide-y divide-ink-800/80">
+                {ALERT_CATEGORY_ROWS.filter((r) => r.group === 'system').map((row) => (
+                  <div
+                    key={row.key}
+                    className="flex items-start justify-between gap-4 px-4 py-3"
+                  >
+                    <div>
+                      <p className="text-sm font-medium text-ink-100">{row.label}</p>
+                      <p className="hint !mt-0.5">{row.description}</p>
+                      <p className="text-[11px] font-mono text-ink-600 mt-0.5">
+                        tag: {row.key.replace(/^alert_/, '')}
+                      </p>
+                    </div>
+                    <Toggle
+                      checked={Boolean(draft[row.key])}
+                      onChange={(v) => setDraft({ ...draft, [row.key]: v })}
+                      label={row.label}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div
+              className={`space-y-4 ${
+                draft.alert_storage_low ? '' : 'opacity-40 pointer-events-none'
+              }`}
+            >
+              <p className="label !mb-0">Storage thresholds</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="label" htmlFor="storage-threshold">
+                    Usage threshold (%)
+                  </label>
+                  <input
+                    id="storage-threshold"
+                    type="number"
+                    min={50}
+                    max={100}
+                    className="input max-w-[10rem]"
+                    value={draft.storage_alert_threshold_percent}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        storage_alert_threshold_percent: Math.min(
+                          100,
+                          Math.max(50, parseInt(e.target.value || '90', 10))
+                        ),
+                      })
+                    }
+                  />
+                  <p className="hint">Alert when used space reaches this percent.</p>
+                </div>
+                <div>
+                  <label className="label" htmlFor="storage-min-free">
+                    Min free (MB)
+                  </label>
+                  <input
+                    id="storage-min-free"
+                    type="number"
+                    min={0}
+                    step={128}
+                    className="input max-w-[10rem]"
+                    value={draft.storage_alert_min_free_mb}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        storage_alert_min_free_mb: Math.max(
+                          0,
+                          parseInt(e.target.value || '0', 10)
+                        ),
+                      })
+                    }
+                  />
+                  <p className="hint">
+                    Also alert when free space drops below this (0 = ignore).
+                  </p>
+                </div>
+              </div>
+
+              {disk?.available && (
+                <div className="rounded-lg border border-ink-800 bg-ink-950/40 p-4">
+                  <p className="text-xs text-ink-500 mb-2 uppercase tracking-wide">
+                    Current disk ({disk.path})
+                  </p>
+                  <div className="grid grid-cols-3 gap-3 text-sm">
+                    <div>
+                      <span className="text-ink-500">Used</span>
+                      <br />
+                      <span className="font-mono tabular-nums">
+                        {disk.usedMB} MB ({Math.round(disk.usageRatio * 100)}%)
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-ink-500">Free</span>
+                      <br />
+                      <span className="font-mono tabular-nums">{disk.freeMB} MB</span>
+                    </div>
+                    <div>
+                      <span className="text-ink-500">Total</span>
+                      <br />
+                      <span className="font-mono tabular-nums">{disk.totalMB} MB</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3 pt-1">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={sendTestAlert}
+                disabled={testBusy || !draft.alerts_enabled}
+              >
+                {testBusy ? (
+                  <>
+                    <Spinner /> Sending test…
+                  </>
+                ) : (
+                  'Send test notification'
+                )}
+              </button>
+              <span className="text-xs text-ink-500">
+                {alertsConfigured ||
+                (draft.apprise_api_url.trim() &&
+                  (draft.apprise_config_key.trim() ||
+                    appriseUrlsText.trim())) ? (
+                  <span className="text-mint-400">Apprise looks configured</span>
+                ) : (
+                  'Save API URL + config key or URLs, then test'
+                )}
+              </span>
+            </div>
           </div>
         </section>
 

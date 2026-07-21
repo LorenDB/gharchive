@@ -1,4 +1,4 @@
-import { getSettings, listUserIds } from '@/lib/db';
+import { getSettings, listUserIds, DEFAULT_SETTINGS } from '@/lib/db';
 import { getGithubAccount, getGithubToken } from '@/lib/db';
 import { getDb } from '@/lib/db';
 import type { Settings } from '@/lib/db';
@@ -10,6 +10,8 @@ import {
 } from '@/lib/import-stars';
 import { runAsUserAsync } from '@/lib/user-context';
 import { hasEnoughMemory, getAdjustedConcurrency, getMemoryInfo } from '@/lib/memory';
+import { getDiskInfo, isStorageLow } from '@/lib/disk';
+import { sendAlert, isAlertsConfigured } from '@/lib/alerts';
 
 /** Check due work every minute; cadences come from per-user settings. */
 const TICK_MS = 60_000;
@@ -276,7 +278,77 @@ export async function runScheduledGithubScan(
   return { ran, messages };
 }
 
+/** Per-user system health alerts (storage / memory). */
+async function runSystemHealthAlerts(): Promise<void> {
+  const disk = await getDiskInfo();
+  const mem = getMemoryInfo();
+
+  for (const userId of listUserIds()) {
+    await runAsUserAsync(userId, async () => {
+      const settings = getSettings();
+      if (!isAlertsConfigured(settings)) return;
+
+      if (settings.alert_storage_low && disk.available) {
+        const check = isStorageLow(
+          disk,
+          settings.storage_alert_threshold_percent,
+          settings.storage_alert_min_free_mb
+        );
+        if (check.low) {
+          await sendAlert({
+            category: 'storage_low',
+            title: 'Storage low on GHArchive',
+            body: [
+              check.reason || 'Disk space is running low.',
+              '',
+              `| | |`,
+              `|---|---|`,
+              `| Path | \`${disk.path}\` |`,
+              `| Used | ${disk.usedMB} MB (${Math.round(disk.usageRatio * 100)}%) |`,
+              `| Free | ${disk.freeMB} MB |`,
+              `| Total | ${disk.totalMB} MB |`,
+            ].join('\n'),
+            subject: 'global',
+            severity: 'warning',
+          });
+        }
+      }
+
+      if (settings.alert_memory_low && settings.memory_aware_enabled) {
+        const memCheck = hasEnoughMemory();
+        if (!memCheck.ok) {
+          await sendAlert({
+            category: 'memory_low',
+            title: 'Memory low on GHArchive',
+            body: [
+              memCheck.reason || 'Memory is critically low.',
+              '',
+              `| | |`,
+              `|---|---|`,
+              `| Free | ${mem.freeMB} MB |`,
+              `| Used | ${mem.usedMB} MB (${Math.round(mem.usageRatio * 100)}%) |`,
+              `| Total | ${mem.totalMB} MB |`,
+              `| Heap | ${mem.heapUsedMB} MB |`,
+              mem.cgroupLimited ? `| Limit | cgroup ${mem.cgroupLimitMB} MB |` : '',
+            ]
+              .filter(Boolean)
+              .join('\n'),
+            subject: 'global',
+            severity: 'warning',
+          });
+        }
+      }
+    });
+  }
+}
+
 async function tick() {
+  try {
+    await runSystemHealthAlerts();
+  } catch (err: any) {
+    console.error('[scheduler] health alerts failed:', err?.message || err);
+  }
+
   const memCheck = hasEnoughMemory();
   if (!memCheck.ok) {
     console.log(`[scheduler] skipped tick: ${memCheck.reason}`);
@@ -326,23 +398,7 @@ export function getSchedulerStatus() {
   try {
     settings = getSettings();
   } catch {
-    settings = {
-      auto_sync_enabled: false,
-      sync_interval_hours: 24,
-      download_release_assets: true,
-      max_asset_size_mb: 500,
-      concurrent_syncs: 4,
-      auto_scan_stars_enabled: false,
-      auto_import_stars_enabled: false,
-      auto_scan_owned_enabled: false,
-      auto_import_owned_enabled: false,
-      github_scan_interval_hours: 24,
-      auto_import_owned_include_forks: false,
-      auto_import_owned_include_private: true,
-      memory_aware_enabled: true,
-      min_free_memory_mb: 256,
-      max_memory_usage_ratio: 0.8,
-    };
+    settings = { ...DEFAULT_SETTINGS };
   }
   return {
     started: s.started,
@@ -361,5 +417,7 @@ export function getSchedulerStatus() {
     memory_aware_enabled: settings.memory_aware_enabled,
     memory_info: getMemoryInfo(),
     adjusted_concurrency: getAdjustedConcurrency(settings.concurrent_syncs),
+    alerts_enabled: settings.alerts_enabled,
+    alerts_configured: isAlertsConfigured(settings),
   };
 }

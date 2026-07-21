@@ -7,14 +7,16 @@ import {
   assetExists,
   getReleaseByTag,
   getSettings,
+  getDb,
 } from '@/lib/db';
-import { syncMirror } from '@/lib/git';
+import { syncMirror, isRemoteMissingError } from '@/lib/git';
 import {
   fetchReleases,
   downloadReleaseAsset,
   getReleaseAssetPath,
 } from '@/lib/releases';
 import { hasEnoughMemory } from '@/lib/memory';
+import { sendAlert, repoLabel } from '@/lib/alerts';
 
 export interface RepoLike {
   id: number;
@@ -27,6 +29,7 @@ export interface RepoLike {
 /**
  * Full sync: snapshot+fetch git mirror, then pull releases/assets.
  * When `skipGit` is true (fresh clone), only release metadata/assets are synced.
+ * Emits Apprise alerts for major archive events when configured.
  */
 export async function syncRepo(
   repo: RepoLike,
@@ -34,6 +37,7 @@ export async function syncRepo(
 ): Promise<{ ok: boolean; messages: string[]; error?: string }> {
   const messages: string[] = [];
   const settings = getSettings();
+  const label = repoLabel(repo);
 
   if (!options.skipGit) {
     const memCheck = hasEnoughMemory();
@@ -47,19 +51,100 @@ export async function syncRepo(
     }
 
     try {
-      const gitMsg = await syncMirror(repo.mirror_path);
-      messages.push(`git: ${gitMsg || 'up to date'}`);
+      const gitResult = await syncMirror(repo.mirror_path);
+      messages.push(`git: ${gitResult.message || 'up to date'}`);
+
+      if (gitResult.repoDeleted) {
+        messages.push('remote: repository appears deleted/inaccessible');
+        addSyncLog({
+          repo_id: repo.id,
+          status: 'failed',
+          message: messages.join('; '),
+        });
+        await sendAlert({
+          category: 'repo_deleted',
+          title: `Repo deleted: ${label}`,
+          body: [
+            `**${label}** appears to be gone or inaccessible on the remote.`,
+            '',
+            'The local bare mirror and archived releases are still kept.',
+            '',
+            '```',
+            gitResult.message.slice(0, 500),
+            '```',
+          ].join('\n'),
+          subject: `${repo.id}`,
+          severity: 'failure',
+        });
+        return { ok: false, messages, error: 'Remote repository not found' };
+      }
+
+      if (gitResult.historyWiped) {
+        messages.push(`history wipe: ${gitResult.historyDetails.join('; ')}`);
+        await sendAlert({
+          category: 'history_wiped',
+          title: `History wiped: ${label}`,
+          body: [
+            `**${label}** git history changed in a destructive way upstream.`,
+            'Pre-fetch tips were snapshotted under `refs/archive/` in the bare mirror.',
+            '',
+            ...gitResult.historyDetails.map((d) => `- ${d}`),
+          ].join('\n'),
+          subject: `${repo.id}:${gitResult.historyDetails[0] || 'wipe'}`,
+          severity: 'failure',
+        });
+      }
     } catch (err: any) {
+      const errMsg = err?.message || String(err);
+      const combined = `${err?.stderr || ''}\n${errMsg}`;
+
+      if (isRemoteMissingError(combined)) {
+        messages.push(`git: remote missing — ${errMsg}`);
+        addSyncLog({
+          repo_id: repo.id,
+          status: 'failed',
+          message: messages.join('; '),
+        });
+        await sendAlert({
+          category: 'repo_deleted',
+          title: `Repo deleted: ${label}`,
+          body: [
+            `**${label}** appears to be gone or inaccessible on the remote.`,
+            '',
+            '```',
+            errMsg.slice(0, 500),
+            '```',
+          ].join('\n'),
+          subject: `${repo.id}`,
+          severity: 'failure',
+        });
+        return { ok: false, messages, error: errMsg };
+      }
+
       addSyncLog({
         repo_id: repo.id,
         status: 'failed',
-        message: `git sync failed: ${err.message}`,
+        message: `git sync failed: ${errMsg}`,
       });
-      return { ok: false, messages, error: err.message };
+      await sendAlert({
+        category: 'sync_failed',
+        title: `Sync failed: ${label}`,
+        body: `Git sync failed for **${label}**:\n\n\`\`\`\n${errMsg.slice(0, 800)}\n\`\`\``,
+        subject: `${repo.id}:git`,
+        severity: 'warning',
+      });
+      return { ok: false, messages, error: errMsg };
     }
   } else {
     messages.push('git: initial clone');
   }
+
+  // Count previously archived releases for wipe detection
+  const priorReleaseCount = getDb().releases.filter(
+    (r) => r.repo_id === repo.id
+  ).length;
+
+  const newReleaseTags: string[] = [];
 
   try {
     const projectPath = `${repo.owner}/${repo.name}`;
@@ -67,6 +152,23 @@ export async function syncRepo(
       repo.platform as 'github' | 'gitlab',
       projectPath
     );
+
+    // Releases wiped: we had archived releases, upstream now returns none
+    if (priorReleaseCount > 0 && releases.length === 0) {
+      messages.push(
+        `releases: wiped upstream (had ${priorReleaseCount} archived, remote has 0)`
+      );
+      await sendAlert({
+        category: 'releases_wiped',
+        title: `Releases wiped: ${label}`,
+        body: [
+          `**${label}** no longer has any releases on the remote.`,
+          `Local archive still has **${priorReleaseCount}** release(s) (metadata/assets preserved).`,
+        ].join('\n'),
+        subject: `${repo.id}`,
+        severity: 'failure',
+      });
+    }
 
     let newReleases = 0;
     let newAssets = 0;
@@ -86,6 +188,7 @@ export async function syncRepo(
           published_at: rel.published_at,
         });
         newReleases++;
+        newReleaseTags.push(rel.tag_name);
       }
 
       const releaseRow = getReleaseByTag(repo.id, rel.tag_name);
@@ -137,8 +240,64 @@ export async function syncRepo(
     let releaseMsg = `releases: ${releases.length} fetched (${newReleases} new, ${newAssets} assets)`;
     if (skippedAssets > 0) releaseMsg += `, ${skippedAssets} skipped`;
     messages.push(releaseMsg);
+
+    // Notify for new releases (one alert listing all new tags this sync)
+    if (newReleaseTags.length > 0) {
+      const tagList = newReleaseTags
+        .slice(0, 20)
+        .map((t) => `- \`${t}\``)
+        .join('\n');
+      const more =
+        newReleaseTags.length > 20
+          ? `\n…and ${newReleaseTags.length - 20} more`
+          : '';
+      await sendAlert({
+        category: 'new_release',
+        title:
+          newReleaseTags.length === 1
+            ? `New release: ${label} ${newReleaseTags[0]}`
+            : `New releases: ${label} (${newReleaseTags.length})`,
+        body: [
+          `**${label}** has ${newReleaseTags.length} new release(s):`,
+          '',
+          tagList + more,
+        ].join('\n'),
+        subject: `${repo.id}:${newReleaseTags.join(',')}`,
+        severity: 'info',
+      });
+    }
   } catch (err: any) {
-    messages.push(`releases: failed - ${err.message}`);
+    const errMsg = err?.message || String(err);
+    messages.push(`releases: failed - ${errMsg}`);
+
+    // API 404 for releases often means repo is gone
+    if (
+      isRemoteMissingError(errMsg) ||
+      /GitHub API error: 404/i.test(errMsg) ||
+      /GitLab API error: 404/i.test(errMsg)
+    ) {
+      await sendAlert({
+        category: 'repo_deleted',
+        title: `Repo deleted: ${label}`,
+        body: [
+          `**${label}** releases API returned not-found.`,
+          '',
+          '```',
+          errMsg.slice(0, 500),
+          '```',
+        ].join('\n'),
+        subject: `${repo.id}`,
+        severity: 'failure',
+      });
+    } else {
+      await sendAlert({
+        category: 'sync_failed',
+        title: `Release sync failed: ${label}`,
+        body: `Release fetch failed for **${label}**:\n\n\`\`\`\n${errMsg.slice(0, 800)}\n\`\`\``,
+        subject: `${repo.id}:releases`,
+        severity: 'warning',
+      });
+    }
   }
 
   updateRepo(repo.id, { last_synced_at: new Date().toISOString() });
