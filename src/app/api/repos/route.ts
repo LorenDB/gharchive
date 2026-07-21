@@ -5,11 +5,13 @@ import {
   getRepoLists,
   setRepoLists,
   getLists,
+  getList,
 } from '@/lib/db';
 import { getMirrorPath, cloneMirror } from '@/lib/git';
 import { parseCloneUrl } from '@/lib/releases';
 import { syncRepo } from '@/lib/sync';
 import { withApiUser } from '@/lib/api-auth';
+import { getImportStatus, enqueueRepoImport, type ImportItem } from '@/lib/import-stars';
 
 export async function GET(req: NextRequest) {
   return withApiUser(async () => {
@@ -72,6 +74,31 @@ export async function POST(req: NextRequest) {
       );
       if (existing) {
         return NextResponse.json({ error: 'Repository already archived' }, { status: 409 });
+      }
+
+      const importStatus = getImportStatus();
+      if (importStatus.running) {
+        const listIds: number[] = Array.isArray(body.list_ids) && body.list_ids.length
+          ? body.list_ids
+              .map((n: any) => parseInt(n, 10))
+              .filter((id: number) => !isNaN(id))
+          : [];
+        const listNames: string[] = listIds
+          .map((id) => getList(id)?.name)
+          .filter((n): n is string => Boolean(n));
+
+        const item: ImportItem = {
+          owner,
+          name: repo,
+          clone_url,
+          github_list_ids: [],
+          local_list_names: listNames.length ? listNames : undefined,
+        };
+
+        return NextResponse.json(
+          { queued: true, message: 'Added to import queue — will be processed next', job: enqueueRepoImport(item) },
+          { status: 202 }
+        );
       }
 
       await cloneMirror(clone_url, mirrorPath);

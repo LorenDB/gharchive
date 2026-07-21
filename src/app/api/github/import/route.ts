@@ -3,6 +3,7 @@ import { fetchStarsPreview } from '@/lib/github';
 import {
   startStarImport,
   getImportStatus,
+  cancelImport,
   itemsFromSelection,
   requireGithubToken,
   scanAndMaybeImportStars,
@@ -92,5 +93,12 @@ export async function POST(req: NextRequest) {
     } catch (err: any) {
       return NextResponse.json({ error: err.message }, { status: 400 });
     }
+  });
+}
+
+export async function DELETE() {
+  return withApiUser(async () => {
+    const job = cancelImport();
+    return NextResponse.json({ ok: true, job });
   });
 }

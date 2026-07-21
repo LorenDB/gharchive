@@ -38,6 +38,8 @@ export interface ImportItem {
   local_list_names?: string[];
   from_star?: boolean;
   from_owned?: boolean;
+  /** User who enqueued this item (for round-robin scheduling) */
+  userId?: string;
 }
 
 export interface ImportJobStatus {
@@ -58,6 +60,10 @@ type JobState = ImportJobStatus & {
   listMap: Map<string, List>;
   /** User who started the job — all db ops run as this user */
   userId: string | null;
+  /** Last user served — for round-robin scheduling across users */
+  lastServedUser: string | null;
+  /** Set to true to cancel a running job */
+  cancelled: boolean;
 };
 
 const g = globalThis as typeof globalThis & {
@@ -80,6 +86,8 @@ function job(): JobState {
       queue: [],
       listMap: new Map(),
       userId: null,
+      lastServedUser: null,
+      cancelled: false,
     };
   }
   return g.__gharchiveImportJob;
@@ -101,6 +109,15 @@ export function getImportStatus(): ImportJobStatus {
   };
 }
 
+export function cancelImport(): ImportJobStatus {
+  const j = job();
+  if (j.running) {
+    j.cancelled = true;
+    j.queue = [];
+  }
+  return getImportStatus();
+}
+
 export function ensureGithubLists(
   lists: { id: string; name: string; description: string | null }[]
 ): Map<string, List> {
@@ -114,6 +131,45 @@ export function ensureGithubLists(
     map.set(l.id, local);
   }
   return map;
+}
+
+/** Enqueue a single repo into the import queue. If a job is already running,
+ *  the repo is prepended to run next. Otherwise a new job is started. */
+export function enqueueRepoImport(item: ImportItem): ImportJobStatus {
+  const j = job();
+  const userId = getRequiredUserId();
+  item.userId = userId;
+
+  if (j.running) {
+    j.queue.unshift(item);
+    j.total++;
+    return getImportStatus();
+  }
+
+  j.running = true;
+  j.total = 1;
+  j.completed = 0;
+  j.failed = 0;
+  j.skipped = 0;
+  j.current = null;
+  j.errors = [];
+  j.started_at = new Date().toISOString();
+  j.finished_at = null;
+  j.source = 'manual-single';
+  j.userId = userId;
+  j.lastServedUser = null;
+  j.cancelled = false;
+  j.queue = [item];
+  j.listMap = new Map();
+
+  processQueue()
+    .catch((err) => {
+      console.error('[import] fatal:', err);
+      j.running = false;
+      j.finished_at = new Date().toISOString();
+    });
+
+  return getImportStatus();
 }
 
 export function startStarImport(
@@ -142,7 +198,9 @@ export function startStarImport(
   j.finished_at = null;
   j.source = source;
   j.userId = userId;
-  j.queue = items.map((i) => ({ ...i, from_star: i.from_star ?? true }));
+  j.lastServedUser = null;
+  j.cancelled = false;
+  j.queue = items.map((i) => ({ ...i, userId: i.userId ?? userId, from_star: i.from_star ?? true }));
   j.listMap = ensureGithubLists(githubLists);
 
   processQueue()
@@ -202,7 +260,9 @@ export async function runImportAwait(
   j.finished_at = null;
   j.source = source;
   j.userId = userId;
-  j.queue = [...items];
+  j.lastServedUser = null;
+  j.cancelled = false;
+  j.queue = items.map((i) => ({ ...i, userId: i.userId ?? userId }));
   j.listMap = ensureGithubLists(githubLists);
 
   try {
@@ -214,6 +274,42 @@ export async function runImportAwait(
   }
 
   return getImportStatus();
+}
+
+/** Pick the next queue item using round-robin across users for fairness. */
+function pickNextItem(): ImportItem | undefined {
+  const j = job();
+  if (j.queue.length === 0) return undefined;
+
+  const userItems = new Map<string, number[]>();
+  for (let i = 0; i < j.queue.length; i++) {
+    const uid = j.queue[i].userId || j.userId || 'unknown';
+    const arr = userItems.get(uid);
+    if (arr) arr.push(i);
+    else userItems.set(uid, [i]);
+  }
+
+  const userIds = [...userItems.keys()];
+  if (userIds.length <= 1) {
+    j.lastServedUser = userIds[0] || null;
+    return j.queue.shift()!;
+  }
+
+  const lastIdx = j.lastServedUser ? userIds.indexOf(j.lastServedUser) : -1;
+  const startIdx = (lastIdx + 1) % userIds.length;
+
+  for (let attempt = 0; attempt < userIds.length; attempt++) {
+    const candidateUser = userIds[(startIdx + attempt) % userIds.length];
+    const indices = userItems.get(candidateUser);
+    if (indices && indices.length > 0) {
+      const idx = indices[0];
+      j.lastServedUser = candidateUser;
+      const [item] = j.queue.splice(idx, 1);
+      return item;
+    }
+  }
+
+  return j.queue.shift()!;
 }
 
 async function processQueue() {
@@ -229,6 +325,8 @@ async function processQueue() {
     const settings = getSettings();
 
     while (j.queue.length > 0) {
+      if (j.cancelled) break;
+
       if (settings.memory_aware_enabled) {
         const memCheck = hasEnoughMemory();
         if (!memCheck.ok) {
@@ -238,7 +336,7 @@ async function processQueue() {
         }
       }
 
-      const item = j.queue.shift()!;
+      const item = pickNextItem()!;
       const full = `${item.owner}/${item.name}`;
       j.current = full;
 
@@ -256,7 +354,7 @@ async function processQueue() {
       }
     }
 
-    j.current = null;
+    j.current = j.cancelled ? 'cancelled' : null;
     j.running = false;
     j.finished_at = new Date().toISOString();
   });

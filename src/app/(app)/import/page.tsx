@@ -167,6 +167,18 @@ export default function ImportStarsPage() {
     }
   }
 
+  async function cancelImport() {
+    try {
+      const res = await fetch('/api/github/import', { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Cancel failed');
+      setJob(data.job);
+      setImporting(false);
+    } catch (err: any) {
+      setError(err.message);
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center gap-2 text-ink-500 text-sm">
@@ -249,12 +261,25 @@ export default function ImportStarsPage() {
             <p className="text-sm font-medium text-ink-200">
               {job.running
                 ? `Importing${job.current ? `: ${job.current}` : '…'}`
+                : job.current === 'cancelled'
+                ? 'Import cancelled'
                 : 'Import finished'}
             </p>
-            <span className="text-xs font-mono text-ink-500">
-              {job.completed} ok · {job.skipped} skipped · {job.failed} failed
-              {job.total ? ` / ${job.total}` : ''}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-mono text-ink-500">
+                {job.completed} ok · {job.skipped} skipped · {job.failed} failed
+                {job.total ? ` / ${job.total}` : ''}
+              </span>
+              {job.running && (
+                <button
+                  type="button"
+                  className="btn-ghost !py-0.5 !px-2 text-xs text-red-400 hover:text-red-300"
+                  onClick={cancelImport}
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
           </div>
           <div className="h-2 rounded-full bg-ink-850 overflow-hidden">
             <div

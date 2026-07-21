@@ -6,6 +6,7 @@ import {
   itemsFromOwned,
   startStarImport,
   getImportStatus,
+  cancelImport,
   scanAndMaybeImportOwned,
 } from '@/lib/import-stars';
 import { withApiUser } from '@/lib/api-auth';
@@ -110,5 +111,12 @@ export async function POST(req: NextRequest) {
     } catch (err: any) {
       return NextResponse.json({ error: err.message }, { status: 400 });
     }
+  });
+}
+
+export async function DELETE() {
+  return withApiUser(async () => {
+    const job = cancelImport();
+    return NextResponse.json({ ok: true, job });
   });
 }
