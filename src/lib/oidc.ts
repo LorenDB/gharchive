@@ -212,6 +212,10 @@ export function getAdminGroup(): string | null {
   return process.env.OIDC_ADMIN_GROUP?.trim() || null;
 }
 
+export function getOidcProviderName(): string {
+  return process.env.OIDC_PROVIDER_NAME?.trim() || 'SSO';
+}
+
 export function claimsToUsername(claims: OidcClaims): string {
   return (
     claims.preferred_username ||

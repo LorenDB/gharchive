@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { getCurrentUser, isOidcConfigured } from '@/lib/auth';
+import { getOidcProviderName } from '@/lib/oidc';
 
 export const dynamic = 'force-dynamic';
 
@@ -55,7 +56,7 @@ export default async function LoginPage({
         ) : null}
 
         <a href={loginHref} className="btn-primary w-full text-center">
-          Continue with SSO
+          Continue with {getOidcProviderName()}
         </a>
 
         <p className="text-center mt-4">
