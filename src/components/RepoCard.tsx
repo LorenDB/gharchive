@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { formatRelativeTime } from '@/lib/format';
 import { languageColor } from '@/lib/language-colors';
+import { platformDisplay, isGithub } from '@/lib/platform';
 import type { PendingItem } from '@/lib/import-stars';
 
 interface ListBadge {
@@ -31,7 +32,7 @@ interface Repo {
 }
 
 export default function RepoCard({ repo }: { repo: Repo }) {
-  const isGithub = repo.platform === 'github';
+  const github = isGithub(repo.platform);
   const lists = repo.lists || [];
   const blurb = repo.local_description || repo.remote_description;
 
@@ -46,12 +47,12 @@ export default function RepoCard({ repo }: { repo: Repo }) {
         <div className="flex flex-wrap items-center gap-1.5 min-w-0">
           <span
             className={`badge ${
-              isGithub
+              github
                 ? 'bg-ink-850 text-ink-200 border border-ink-700'
                 : 'bg-orange-500/10 text-orange-300 border border-orange-500/25'
             }`}
           >
-            {isGithub ? 'GitHub' : 'GitLab'}
+            {platformDisplay(repo.platform)}
           </span>
           {repo.is_archived && (
             <span
@@ -155,7 +156,7 @@ function phaseLabel(item: PendingItem): string {
 }
 
 export function PendingCard({ item }: { item: PendingItem }) {
-  const isGithub = item.platform === 'github';
+  const github = isGithub(item.platform);
   const label = phaseLabel(item);
 
   return (
@@ -164,12 +165,12 @@ export function PendingCard({ item }: { item: PendingItem }) {
         <div className="flex flex-wrap items-center gap-1.5 min-w-0">
           <span
             className={`badge ${
-              isGithub
+              github
                 ? 'bg-ink-850 text-ink-200 border border-ink-700'
                 : 'bg-orange-500/10 text-orange-300 border border-orange-500/25'
             }`}
           >
-            {isGithub ? 'GitHub' : 'GitLab'}
+            {platformDisplay(item.platform)}
           </span>
         </div>
         <span className="h-2 w-2 rounded-full mt-1.5 shrink-0 bg-amber-400 animate-pulse" />

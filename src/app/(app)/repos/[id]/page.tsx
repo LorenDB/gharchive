@@ -7,6 +7,11 @@ import ReleasesViewer from '@/components/ReleasesViewer';
 import ReadmePanel from '@/components/ReadmePanel';
 import LocalDescriptionEditor from '@/components/LocalDescriptionEditor';
 import { formatBytes, formatDate, formatRelativeTime } from '@/lib/format';
+import {
+  isGithub,
+  platformDisplay,
+  repoRemoteUrl,
+} from '@/lib/platform';
 import { languageColor } from '@/lib/language-colors';
 
 type Tab = 'overview' | 'code' | 'releases' | 'activity';
@@ -116,12 +121,10 @@ export default function RepoDetail() {
     );
   }
 
-  const isGithub = repo.platform === 'github';
+  const github = isGithub(repo.platform);
   const topics: string[] = Array.isArray(repo.topics) ? repo.topics : [];
-  const remoteHtml =
-    isGithub
-      ? `https://github.com/${repo.owner}/${repo.name}`
-      : `https://gitlab.com/${repo.owner}/${repo.name}`;
+  const remoteHtml = repoRemoteUrl(repo);
+  const platformName = platformDisplay(repo.platform);
 
   const tabs: { id: Tab; label: string; count?: number }[] = [
     { id: 'overview', label: 'Overview' },
@@ -144,12 +147,12 @@ export default function RepoDetail() {
           <div className="flex flex-wrap items-center gap-2 mb-2">
             <span
               className={`badge ${
-                isGithub
+                github
                   ? 'bg-ink-850 text-ink-200 border border-ink-700'
                   : 'bg-orange-500/10 text-orange-300 border border-orange-500/25'
               }`}
             >
-              {isGithub ? 'GitHub' : 'GitLab'}
+              {platformName}
             </span>
             {repo.is_private && (
               <span className="badge-muted">private</span>
@@ -234,14 +237,16 @@ export default function RepoDetail() {
                 {stripUrl(repo.homepage)}
               </a>
             )}
-            <a
-              href={remoteHtml}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-ink-400 hover:text-ink-200"
-            >
-              View on {isGithub ? 'GitHub' : 'GitLab'} ↗
-            </a>
+            {remoteHtml && (
+              <a
+                href={remoteHtml}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-ink-400 hover:text-ink-200"
+              >
+                View on {platformName} ↗
+              </a>
+            )}
           </div>
 
           <p className="text-sm text-ink-500 mt-2 font-mono break-all">
@@ -366,7 +371,7 @@ export default function RepoDetail() {
             <p className="font-medium text-amber-200">Archived upstream</p>
             <p className="text-amber-200/70 mt-0.5 leading-relaxed">
               This repository is marked as archived on{' '}
-              {isGithub ? 'GitHub' : 'GitLab'}. The local mirror and releases
+              {platformName}. The local mirror and releases
               are still kept; new commits or releases from upstream are unlikely.
             </p>
           </div>

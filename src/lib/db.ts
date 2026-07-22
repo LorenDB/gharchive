@@ -321,7 +321,7 @@ export const LIST_COLORS = [
   '#f472b6', // pink
 ];
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 let data: Data | null = null;
 let nextIds: Record<string, number> = {};
@@ -762,8 +762,94 @@ function migrate(raw: Record<string, unknown>): Data {
     delete (rel as any).repo_id;
   }
 
+  // v3 → v4: fix archives whose platform was hardcoded to github on import
+  // even though clone_url points at gitlab.com (and vice versa).
+  if ((d.schema_version || 0) < 4) {
+    repairArchivePlatformFromCloneUrl(d);
+  }
+
   d.schema_version = SCHEMA_VERSION;
   return d;
+}
+
+/**
+ * Infer github|gitlab from a clone URL host. Returns null if unknown.
+ * Kept local to avoid circular imports with releases.ts.
+ */
+function inferPlatformFromCloneUrl(
+  cloneUrl: string | null | undefined
+): 'github' | 'gitlab' | null {
+  if (!cloneUrl || typeof cloneUrl !== 'string') return null;
+  const s = cloneUrl.trim().toLowerCase();
+  // git@gitlab.com:group/project.git  or  https://gitlab.com/...
+  if (
+    /(^|[@/.])gitlab\.com([/:]|$)/.test(s) ||
+    s.includes('://gitlab.com/') ||
+    s.startsWith('git@gitlab.com:')
+  ) {
+    return 'gitlab';
+  }
+  if (
+    /(^|[@/.])github\.com([/:]|$)/.test(s) ||
+    s.includes('://github.com/') ||
+    s.startsWith('git@github.com:')
+  ) {
+    return 'github';
+  }
+  return null;
+}
+
+/**
+ * Repair archives that store platform "github" with a gitlab.com clone_url
+ * (bug from importOne hardcoding platform). Relocates the bare mirror when
+ * the on-disk path embeds the wrong platform segment.
+ */
+function repairArchivePlatformFromCloneUrl(d: Data): void {
+  for (const a of d.archives) {
+    const inferred = inferPlatformFromCloneUrl(a.clone_url);
+    if (!inferred || inferred === a.platform) continue;
+
+    const oldPlatform = a.platform;
+    console.warn(
+      `[db] repair archive #${a.id} ${a.owner}/${a.name}: platform ${oldPlatform} → ${inferred} (from clone_url)`
+    );
+    a.platform = inferred;
+
+    if (!a.mirror_path) continue;
+
+    // Replace /{oldPlatform}/ path segment with /{inferred}/
+    const re = new RegExp(
+      `(^|[/\\\\])${oldPlatform.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([/\\\\])`
+    );
+    if (!re.test(a.mirror_path)) continue;
+
+    const newPath = a.mirror_path.replace(re, `$1${inferred}$2`);
+    if (newPath === a.mirror_path) continue;
+
+    try {
+      if (fs.existsSync(a.mirror_path) && !fs.existsSync(newPath)) {
+        fs.mkdirSync(path.dirname(newPath), { recursive: true });
+        fs.renameSync(a.mirror_path, newPath);
+        a.mirror_path = newPath;
+      } else if (fs.existsSync(newPath)) {
+        // Target already present — drop the mis-tagged copy
+        if (fs.existsSync(a.mirror_path)) {
+          fs.rmSync(a.mirror_path, { recursive: true, force: true });
+        }
+        a.mirror_path = newPath;
+      } else {
+        // Neither exists (mirror missing) — still rewrite the recorded path
+        a.mirror_path = newPath;
+      }
+    } catch (err) {
+      console.error(
+        `[db] failed to relocate mirror for archive #${a.id}:`,
+        err instanceof Error ? err.message : err
+      );
+      // Keep platform fix even if move failed; path may be updated on next sync
+      a.mirror_path = newPath;
+    }
+  }
 }
 
 function getDbBakPath(): string {

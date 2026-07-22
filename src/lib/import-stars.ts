@@ -23,6 +23,7 @@ import {
   type GhStarredRepo,
   type GhOwnedRepo,
 } from '@/lib/github';
+import { parseCloneUrl } from '@/lib/releases';
 import {
   getRequiredUserId,
   runAsUserAsync,
@@ -45,6 +46,32 @@ export interface ImportItem {
   is_private?: boolean;
   /** User who enqueued this item (for round-robin scheduling) */
   userId?: string;
+}
+
+/** Resolve platform from explicit field or clone URL (never assume GitHub). */
+export function resolveImportPlatform(
+  item: Pick<ImportItem, 'platform' | 'clone_url'>
+): 'github' | 'gitlab' {
+  if (item.platform === 'github' || item.platform === 'gitlab') {
+    return item.platform;
+  }
+  if (item.clone_url) {
+    try {
+      return parseCloneUrl(item.clone_url).platform;
+    } catch {
+      // fall through
+    }
+  }
+  return 'github';
+}
+
+function defaultCloneUrl(
+  platform: 'github' | 'gitlab',
+  owner: string,
+  name: string
+): string {
+  const host = platform === 'gitlab' ? 'gitlab.com' : 'github.com';
+  return `https://${host}/${owner}/${name}.git`;
 }
 
 export const PENDING_PHASES = ['queued', 'cloning', 'releases'] as const;
@@ -183,7 +210,7 @@ export function enqueueRepoImport(item: ImportItem): ImportJobStatus {
   const j = job();
   const userId = getRequiredUserId();
   item.userId = userId;
-  item.platform = item.platform || 'github';
+  item.platform = resolveImportPlatform(item);
 
   const fullName = `${item.owner}/${item.name}`;
 
@@ -267,7 +294,12 @@ export function startStarImport(
   j.userId = userId;
   j.lastServedUser = null;
   j.cancelled = false;
-  j.queue = items.map((i) => ({ ...i, userId: i.userId ?? userId, from_star: i.from_star ?? true }));
+  j.queue = items.map((i) => ({
+    ...i,
+    userId: i.userId ?? userId,
+    from_star: i.from_star ?? true,
+    platform: resolveImportPlatform(i),
+  }));
   j.listMap = ensureGithubLists(githubLists);
   j._pending = new Map();
 
@@ -344,7 +376,11 @@ export async function runImportAwait(
   j.userId = userId;
   j.lastServedUser = null;
   j.cancelled = false;
-  j.queue = items.map((i) => ({ ...i, userId: i.userId ?? userId }));
+  j.queue = items.map((i) => ({
+    ...i,
+    userId: i.userId ?? userId,
+    platform: resolveImportPlatform(i),
+  }));
   j.listMap = ensureGithubLists(githubLists);
   j._pending = new Map();
 
@@ -472,9 +508,10 @@ async function processQueue() {
 }
 
 async function importOne(item: ImportItem, listMap: Map<string, List>) {
-  const existing = findRepo('github', item.owner, item.name);
+  const platform = resolveImportPlatform(item);
+  item.platform = platform;
+  const existing = findRepo(platform, item.owner, item.name);
   const fullName = `${item.owner}/${item.name}`;
-  const platform = item.platform || 'github';
 
   const setPhase = (phase: PendingPhase, detail: string | null = null) => {
     const current = job()._pending.get(fullName);
@@ -515,14 +552,14 @@ async function importOne(item: ImportItem, listMap: Map<string, List>) {
   }
 
   const cloneUrl =
-    item.clone_url || `https://github.com/${item.owner}/${item.name}.git`;
+    item.clone_url || defaultCloneUrl(platform, item.owner, item.name);
   const isPrivate = Boolean(item.is_private);
 
   let repo;
   let linkedOnly = false;
 
   if (!isPrivate) {
-    const shared = findPublicArchive('github', item.owner, item.name);
+    const shared = findPublicArchive(platform, item.owner, item.name);
     if (shared) {
       repo = linkUserToArchive(shared.id, {
         from_star: Boolean(item.from_star),
@@ -534,13 +571,13 @@ async function importOne(item: ImportItem, listMap: Map<string, List>) {
 
   if (!repo) {
     setPhase('cloning');
-    const mirrorPath = getMirrorPath('github', item.owner, item.name, {
+    const mirrorPath = getMirrorPath(platform, item.owner, item.name, {
       isPrivate,
       userId: tryGetUserId() || undefined,
     });
     await cloneMirror(cloneUrl, mirrorPath);
     const archive = createArchive({
-      platform: 'github',
+      platform,
       owner: item.owner,
       name: item.name,
       clone_url: cloneUrl,

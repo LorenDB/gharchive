@@ -108,4 +108,73 @@ describe('db atomic persistence', () => {
       JSON.parse(fs.readFileSync(dbPath(), 'utf8'))
     ).not.toThrow();
   });
+
+  it('repairs gitlab archives that were stored as github (schema v4)', () => {
+    const wrongMirror = path.join(
+      tempDir,
+      'mirrors',
+      'github',
+      'Mr_Goldberg',
+      'goldberg_emulator.git'
+    );
+    const rightMirror = path.join(
+      tempDir,
+      'mirrors',
+      'gitlab',
+      'Mr_Goldberg',
+      'goldberg_emulator.git'
+    );
+    fs.mkdirSync(wrongMirror, { recursive: true });
+    fs.writeFileSync(path.join(wrongMirror, 'HEAD'), 'ref: refs/heads/main\n');
+
+    fs.writeFileSync(
+      dbPath(),
+      JSON.stringify({
+        schema_version: 3,
+        users: [],
+        legacy_claimed_by: null,
+        archives: [
+          {
+            id: 1,
+            platform: 'github',
+            owner: 'Mr_Goldberg',
+            name: 'goldberg_emulator',
+            clone_url: 'https://gitlab.com/Mr_Goldberg/goldberg_emulator',
+            mirror_path: wrongMirror,
+            last_synced_at: null,
+            is_private: false,
+          },
+        ],
+        repos: [
+          {
+            id: 1,
+            owner_id: AUTOLOGIN_USER_ID,
+            archive_id: 1,
+            created_at: new Date().toISOString(),
+          },
+        ],
+        releases: [],
+        release_assets: [],
+        sync_logs: [],
+        settings_by_user: {},
+        lists: [],
+        repo_lists: [],
+        github_accounts: {},
+      })
+    );
+
+    resetDbForTests();
+    warmDb();
+
+    const repos = runAsUser(AUTOLOGIN_USER_ID, () => getDb().repos);
+    expect(repos).toHaveLength(1);
+    expect(repos[0]!.platform).toBe('gitlab');
+    expect(repos[0]!.mirror_path).toBe(rightMirror);
+    expect(fs.existsSync(rightMirror)).toBe(true);
+    expect(fs.existsSync(wrongMirror)).toBe(false);
+
+    const onDisk = JSON.parse(fs.readFileSync(dbPath(), 'utf8'));
+    expect(onDisk.schema_version).toBe(4);
+    expect(onDisk.archives[0].platform).toBe('gitlab');
+  });
 });
