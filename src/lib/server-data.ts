@@ -10,9 +10,11 @@ import {
   getRepoLists,
   getSettings,
   getGithubAccountPublic,
+  listUsersWithUsage,
   DEFAULT_SETTINGS,
   type Settings,
   type List,
+  type UserUsageSummary,
 } from '@/lib/db';
 import { getSchedulerStatus } from '@/lib/scheduler';
 import {
@@ -137,8 +139,11 @@ export async function getSettingsPageData(user: SessionUser): Promise<{
   is_admin: boolean;
   github_account: ReturnType<typeof getGithubAccountPublic>;
   lists: { id: number; name: string; github_list_id: string | null }[];
+  /** Present only for admins — registered users with storage attribution. */
+  users: UserUsageSummary[] | null;
 }> {
   const settings = getSettings();
+  const admin = isAdmin(user);
   let disk = null;
   try {
     disk = await getDiskInfo();
@@ -165,8 +170,9 @@ export async function getSettingsPageData(user: SessionUser): Promise<{
       })),
     },
     disk,
-    is_admin: isAdmin(user),
+    is_admin: admin,
     github_account: getGithubAccountPublic(),
     lists: allLists,
+    users: admin ? listUsersWithUsage() : null,
   };
 }

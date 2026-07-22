@@ -89,6 +89,7 @@ export async function GET() {
       alerts: data.alerts,
       disk: data.disk,
       is_admin: data.is_admin,
+      users: data.users,
     });
   });
 }

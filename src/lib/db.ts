@@ -1213,6 +1213,127 @@ export function listUserIds(): string[] {
   return [...ids];
 }
 
+/** Admin overview: registered users + storage attributed to their memberships. */
+export interface UserUsageSummary {
+  id: string;
+  username: string;
+  email: string | null;
+  name: string | null;
+  created_at: string | null;
+  last_login_at: string | null;
+  /** True when the user has an AppUser row (SSO login), not just orphaned data. */
+  registered: boolean;
+  repo_count: number;
+  private_repo_count: number;
+  /**
+   * Bytes attributed to this user: exclusive private archives fully,
+   * shared public archives split evenly among members.
+   */
+  storage_bytes: number;
+}
+
+/**
+ * List every known user with membership counts and attributed on-disk storage.
+ * Shared public archives count `size / memberCount` toward each member.
+ * Does not require a user context (admin-only callers).
+ */
+export function listUsersWithUsage(): UserUsageSummary[] {
+  const d = load();
+  const appUsers = new Map(d.users.map((u) => [u.id, u]));
+  const ids = new Set(listUserIds());
+
+  const membersByArchive = new Map<number, Set<string>>();
+  const repoCountByUser = new Map<string, number>();
+  const privateCountByUser = new Map<string, number>();
+
+  for (const m of d.repos) {
+    ids.add(m.owner_id);
+    repoCountByUser.set(m.owner_id, (repoCountByUser.get(m.owner_id) || 0) + 1);
+    let set = membersByArchive.get(m.archive_id);
+    if (!set) {
+      set = new Set();
+      membersByArchive.set(m.archive_id, set);
+    }
+    set.add(m.owner_id);
+  }
+
+  // Release asset bytes keyed by archive_id (prefer on-disk size when path exists)
+  const assetBytesByArchive = new Map<number, number>();
+  const releaseToArchive = new Map<number, number>();
+  for (const rel of d.releases) {
+    releaseToArchive.set(rel.id, rel.archive_id);
+  }
+  for (const asset of d.release_assets) {
+    const archiveId = releaseToArchive.get(asset.release_id);
+    if (archiveId == null) continue;
+    let bytes = 0;
+    if (asset.file_path) {
+      try {
+        if (fs.existsSync(asset.file_path)) {
+          bytes = fs.statSync(asset.file_path).size;
+        } else if (typeof asset.size === 'number' && asset.size > 0) {
+          bytes = asset.size;
+        }
+      } catch {
+        if (typeof asset.size === 'number' && asset.size > 0) bytes = asset.size;
+      }
+    }
+    assetBytesByArchive.set(
+      archiveId,
+      (assetBytesByArchive.get(archiveId) || 0) + bytes
+    );
+  }
+
+  const storageByUser = new Map<string, number>();
+  for (const archive of d.archives) {
+    const members = membersByArchive.get(archive.id);
+    if (!members || members.size === 0) continue;
+
+    if (archive.is_private) {
+      for (const uid of members) {
+        privateCountByUser.set(uid, (privateCountByUser.get(uid) || 0) + 1);
+      }
+    }
+
+    const mirrorBytes = dirSizeSafe(archive.mirror_path || '');
+    const assetBytes = assetBytesByArchive.get(archive.id) || 0;
+    const total = mirrorBytes + assetBytes;
+    if (total <= 0) continue;
+    const share = total / members.size;
+    for (const uid of members) {
+      storageByUser.set(uid, (storageByUser.get(uid) || 0) + share);
+    }
+  }
+
+  const summaries: UserUsageSummary[] = [];
+  for (const id of ids) {
+    const app = appUsers.get(id);
+    summaries.push({
+      id,
+      username: app?.username || id,
+      email: app?.email ?? null,
+      name: app?.name ?? null,
+      created_at: app?.created_at ?? null,
+      last_login_at: app?.last_login_at ?? null,
+      registered: Boolean(app),
+      repo_count: repoCountByUser.get(id) || 0,
+      private_repo_count: privateCountByUser.get(id) || 0,
+      storage_bytes: Math.round(storageByUser.get(id) || 0),
+    });
+  }
+
+  summaries.sort((a, b) => {
+    // Registered users first, then by storage desc, then username
+    if (a.registered !== b.registered) return a.registered ? -1 : 1;
+    if (b.storage_bytes !== a.storage_bytes) {
+      return b.storage_bytes - a.storage_bytes;
+    }
+    return a.username.localeCompare(b.username);
+  });
+
+  return summaries;
+}
+
 // ── Scoped db view ──────────────────────────────────────────────
 
 export function getDb() {

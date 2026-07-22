@@ -5,8 +5,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runAsUser, AUTOLOGIN_USER_ID } from '@/lib/user-context';
 import {
   createArchive,
+  ensureAppUser,
   getDb,
   linkUserToArchive,
+  listUsersWithUsage,
   resetDbForTests,
   updateSettings,
   warmDb,
@@ -176,5 +178,90 @@ describe('db atomic persistence', () => {
     const onDisk = JSON.parse(fs.readFileSync(dbPath(), 'utf8'));
     expect(onDisk.schema_version).toBe(4);
     expect(onDisk.archives[0].platform).toBe('gitlab');
+  });
+});
+
+describe('listUsersWithUsage', () => {
+  it('splits shared public archive storage and attributes private fully', () => {
+    const publicMirror = path.join(
+      tempDir,
+      'mirrors',
+      'github',
+      'acme',
+      'shared.git'
+    );
+    const privateMirror = path.join(
+      tempDir,
+      'mirrors',
+      'users',
+      'alice',
+      'github',
+      'acme',
+      'secret.git'
+    );
+    fs.mkdirSync(publicMirror, { recursive: true });
+    fs.mkdirSync(privateMirror, { recursive: true });
+    fs.writeFileSync(path.join(publicMirror, 'blob'), 'x'.repeat(1000));
+    fs.writeFileSync(path.join(privateMirror, 'blob'), 'y'.repeat(400));
+
+    ensureAppUser({
+      id: 'alice',
+      username: 'alice',
+      email: 'alice@example.com',
+      name: 'Alice',
+      role: 'user',
+      groups: [],
+    });
+    ensureAppUser({
+      id: 'bob',
+      username: 'bob',
+      email: null,
+      name: null,
+      role: 'user',
+      groups: [],
+    });
+
+    const publicArch = createArchive({
+      platform: 'github',
+      owner: 'acme',
+      name: 'shared',
+      clone_url: 'https://github.com/acme/shared.git',
+      mirror_path: publicMirror,
+      last_synced_at: null,
+      is_private: false,
+    });
+    const privateArch = createArchive({
+      platform: 'github',
+      owner: 'acme',
+      name: 'secret',
+      clone_url: 'https://github.com/acme/secret.git',
+      mirror_path: privateMirror,
+      last_synced_at: null,
+      is_private: true,
+    });
+
+    runAsUser('alice', () => {
+      linkUserToArchive(publicArch.id);
+      linkUserToArchive(privateArch.id);
+    });
+    runAsUser('bob', () => {
+      linkUserToArchive(publicArch.id);
+    });
+
+    const users = listUsersWithUsage();
+    const alice = users.find((u) => u.id === 'alice');
+    const bob = users.find((u) => u.id === 'bob');
+
+    expect(alice).toBeTruthy();
+    expect(bob).toBeTruthy();
+    expect(alice!.registered).toBe(true);
+    expect(alice!.repo_count).toBe(2);
+    expect(alice!.private_repo_count).toBe(1);
+    expect(bob!.repo_count).toBe(1);
+    expect(bob!.private_repo_count).toBe(0);
+
+    // Public 1000 bytes / 2 members = 500 each; alice also gets private 400
+    expect(alice!.storage_bytes).toBe(900);
+    expect(bob!.storage_bytes).toBe(500);
   });
 });

@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
-import { formatDate } from '@/lib/format';
+import { formatBytes, formatDate } from '@/lib/format';
 
 interface Settings {
   auto_sync_enabled: boolean;
@@ -73,6 +73,19 @@ interface DiskInfo {
   available: boolean;
 }
 
+interface UserUsageSummary {
+  id: string;
+  username: string;
+  email: string | null;
+  name: string | null;
+  created_at: string | null;
+  last_login_at: string | null;
+  registered: boolean;
+  repo_count: number;
+  private_repo_count: number;
+  storage_bytes: number;
+}
+
 const ALERT_CATEGORY_ROWS: {
   key: keyof Settings;
   label: string;
@@ -138,6 +151,8 @@ const INTERVAL_LABELS: Record<number, string> = {
   168: 'Weekly',
 };
 
+type SettingsTab = 'settings' | 'admin';
+
 type InitialSettingsData = {
   settings: Settings;
   interval_options: number[];
@@ -154,6 +169,7 @@ type InitialSettingsData = {
     last_owned_import_at: string | null;
   } | null;
   lists: { id: number; name: string; github_list_id: string | null }[];
+  users: UserUsageSummary[] | null;
 };
 
 export default function SettingsClient({
@@ -206,6 +222,8 @@ export default function SettingsClient({
     initial.settings?.rejected_asset_hosts || []
   );
   const [hostBusy, setHostBusy] = useState<string | null>(null);
+  const [users, setUsers] = useState<UserUsageSummary[] | null>(initial.users);
+  const [tab, setTab] = useState<SettingsTab>('settings');
 
   async function linkGithub(e: React.FormEvent) {
     e.preventDefault();
@@ -291,8 +309,6 @@ export default function SettingsClient({
     }
   }
 
-  // Initial state comes from the server; `load()` is used after mutations.
-
   const urlsDirty =
     draft != null &&
     appriseUrlsText
@@ -344,7 +360,6 @@ export default function SettingsClient({
     setTestBusy(true);
     setMessage(null);
     try {
-      // Persist draft first so the test uses current form values
       if (draft && dirty) {
         const payload = {
           ...draft,
@@ -447,7 +462,6 @@ export default function SettingsClient({
         if (!res.ok) throw new Error(data.error || 'Owned scan failed');
         setMessage({ type: 'ok', text: data.result?.message || 'Owned scan done' });
       }
-      // refresh account timestamps
       const ghRes = await fetch('/api/github');
       if (ghRes.ok) {
         const gh = await ghRes.json();
@@ -457,11 +471,25 @@ export default function SettingsClient({
       if (setRes.ok) {
         const s = await setRes.json();
         setScheduler(s.scheduler);
+        if (Array.isArray(s.users)) setUsers(s.users);
+        if (s.disk) setDisk(s.disk);
       }
     } catch (err: any) {
       setMessage({ type: 'err', text: err.message });
     } finally {
       setScanBusy(null);
+    }
+  }
+
+  async function refreshUsers() {
+    try {
+      const res = await fetch('/api/settings');
+      if (!res.ok) return;
+      const s = await res.json();
+      if (Array.isArray(s.users)) setUsers(s.users);
+      if (s.disk) setDisk(s.disk);
+    } catch {
+      // ignore refresh errors
     }
   }
 
@@ -473,14 +501,45 @@ export default function SettingsClient({
     );
   }
 
+  const totalUserStorage = (users || []).reduce((sum, u) => sum + u.storage_bytes, 0);
+  const activeTab: SettingsTab = isAdmin ? tab : 'settings';
+
   return (
     <div className="max-w-2xl">
-      <div className="mb-8">
+      <div className="mb-6">
         <h1 className="page-title">Settings</h1>
         <p className="page-subtitle">
           Control how often archives update and how release assets are stored.
         </p>
       </div>
+
+      {isAdmin && (
+        <div className="border-b border-ink-800 mb-6">
+          <nav className="flex items-center gap-1 -mb-px overflow-x-auto" aria-label="Settings sections">
+            {(
+              [
+                { id: 'settings' as const, label: 'Settings' },
+                { id: 'admin' as const, label: 'Admin' },
+              ] as const
+            ).map((t) => {
+              const active = activeTab === t.id;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => setTab(t.id)}
+                  className={active ? 'tab-btn-active' : 'tab-btn-idle'}
+                >
+                  <span className="leading-none">{t.label}</span>
+                  {active && (
+                    <span className="absolute bottom-0 left-2 right-2 h-0.5 rounded-full bg-amber-400" />
+                  )}
+                </button>
+              );
+            })}
+          </nav>
+        </div>
+      )}
 
       {message && (
         <div
@@ -495,398 +554,794 @@ export default function SettingsClient({
       )}
 
       <div className="space-y-6">
-        {/* GitHub account */}
-        <section className="surface p-5 sm:p-6">
-          <h2 className="text-base font-semibold text-white mb-1">GitHub account</h2>
-          <p className="hint !mt-0 mb-5">
-            Link a personal access token to import starred repositories and star lists.
-            Token is stored only in local <span className="font-mono">data/db.json</span>.
-            Needs classic PAT with <span className="font-mono">read:user</span> for
-            stars; add <span className="font-mono">repo</span> to include private
-            owned repositories.{' '}
-            <a
-              href="https://github.com/settings/tokens/new?description=GHArchive&scopes=read:user,repo"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-amber-400 hover:text-amber-300 underline underline-offset-2"
-            >
-              Create a classic PAT on GitHub ↗
-            </a>
-          </p>
-
-          {ghAccount ? (
-            <div className="space-y-4">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="badge-mint">@{ghAccount.username}</span>
-                <span className="text-xs text-ink-500">
-                  Linked {formatDate(ghAccount.linked_at)}
-                </span>
-              </div>
-              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-ink-500">
-                <div>
-                  Stars scan:{' '}
-                  {ghAccount.last_stars_scan_at
-                    ? formatDate(ghAccount.last_stars_scan_at)
-                    : 'never'}
-                </div>
-                <div>
-                  Owned scan:{' '}
-                  {ghAccount.last_owned_scan_at
-                    ? formatDate(ghAccount.last_owned_scan_at)
-                    : 'never'}
-                </div>
-              </dl>
-              <div className="flex flex-wrap gap-2">
-                <Link href="/import" className="btn-primary">
-                  Import stars
-                </Link>
-                <button
-                  type="button"
-                  className="btn-danger"
-                  onClick={unlinkGithub}
-                  disabled={ghBusy}
+        {activeTab === 'settings' && (
+          <>
+            {/* GitHub account */}
+            <section className="surface p-5 sm:p-6">
+              <h2 className="text-base font-semibold text-white mb-1">GitHub account</h2>
+              <p className="hint !mt-0 mb-5">
+                Link a personal access token to import starred repositories and star lists.
+                Token is stored only in local <span className="font-mono">data/db.json</span>.
+                Needs classic PAT with <span className="font-mono">read:user</span> for
+                stars; add <span className="font-mono">repo</span> to include private
+                owned repositories.{' '}
+                <a
+                  href="https://github.com/settings/tokens/new?description=GHArchive&scopes=read:user,repo"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-amber-400 hover:text-amber-300 underline underline-offset-2"
                 >
-                  Unlink
-                </button>
-              </div>
-            </div>
-          ) : (
-            <form onSubmit={linkGithub} className="space-y-3">
-              <div>
-                <label className="label" htmlFor="gh-token">
-                  Personal access token
-                </label>
-                <input
-                  id="gh-token"
-                  type="password"
-                  className="input font-mono text-[13px]"
-                  value={ghToken}
-                  onChange={(e) => setGhToken(e.target.value)}
-                  placeholder="ghp_… or github_pat_…"
-                  autoComplete="off"
-                />
-              </div>
-              <button
-                type="submit"
-                className="btn-primary"
-                disabled={ghBusy || !ghToken.trim()}
-              >
-                {ghBusy ? (
-                  <>
-                    <Spinner /> Linking…
-                  </>
-                ) : (
-                  'Link account'
-                )}
-              </button>
-            </form>
-          )}
-        </section>
+                  Create a classic PAT on GitHub ↗
+                </a>
+              </p>
 
-        {/* GitHub auto-scan / import */}
-        <section className="surface p-5 sm:p-6">
-          <h2 className="text-base font-semibold text-white mb-1">
-            GitHub auto-discovery
-          </h2>
-          <p className="hint !mt-0 mb-5">
-            Periodically scan the linked account for new stars and owned repositories.
-            Enable auto-import to mirror anything not yet archived. Requires a linked
-            GitHub token.
-          </p>
-
-          <div
-            className={`space-y-5 ${!ghAccount ? 'opacity-40 pointer-events-none' : ''}`}
-          >
-            <div>
-              <label className="label">Scan frequency</label>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                {intervals.map((h) => {
-                  const selected = draft.github_scan_interval_hours === h;
-                  return (
+              {ghAccount ? (
+                <div className="space-y-4">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="badge-mint">@{ghAccount.username}</span>
+                    <span className="text-xs text-ink-500">
+                      Linked {formatDate(ghAccount.linked_at)}
+                    </span>
+                  </div>
+                  <dl className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-ink-500">
+                    <div>
+                      Stars scan:{' '}
+                      {ghAccount.last_stars_scan_at
+                        ? formatDate(ghAccount.last_stars_scan_at)
+                        : 'never'}
+                    </div>
+                    <div>
+                      Owned scan:{' '}
+                      {ghAccount.last_owned_scan_at
+                        ? formatDate(ghAccount.last_owned_scan_at)
+                        : 'never'}
+                    </div>
+                  </dl>
+                  <div className="flex flex-wrap gap-2">
+                    <Link href="/import" className="btn-primary">
+                      Import stars
+                    </Link>
                     <button
-                      key={h}
                       type="button"
-                      onClick={() =>
-                        setDraft({ ...draft, github_scan_interval_hours: h })
-                      }
-                      className={`rounded-lg border px-3 py-2.5 text-left text-sm transition-all ${
-                        selected
-                          ? 'border-amber-400/50 bg-amber-400/10 text-amber-300 shadow-glow'
-                          : 'border-ink-700 bg-ink-950/50 text-ink-300 hover:border-ink-600'
-                      }`}
+                      className="btn-danger"
+                      onClick={unlinkGithub}
+                      disabled={ghBusy}
                     >
-                      <span className="block font-medium">
-                        {INTERVAL_LABELS[h] || `Every ${h}h`}
-                      </span>
-                      <span className="block text-[11px] text-ink-500 mt-0.5 font-mono">
-                        {h}h
-                      </span>
+                      Unlink
                     </button>
-                  );
-                })}
-              </div>
-            </div>
+                  </div>
+                </div>
+              ) : (
+                <form onSubmit={linkGithub} className="space-y-3">
+                  <div>
+                    <label className="label" htmlFor="gh-token">
+                      Personal access token
+                    </label>
+                    <input
+                      id="gh-token"
+                      type="password"
+                      className="input font-mono text-[13px]"
+                      value={ghToken}
+                      onChange={(e) => setGhToken(e.target.value)}
+                      placeholder="ghp_… or github_pat_…"
+                      autoComplete="off"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    className="btn-primary"
+                    disabled={ghBusy || !ghToken.trim()}
+                  >
+                    {ghBusy ? (
+                      <>
+                        <Spinner /> Linking…
+                      </>
+                    ) : (
+                      'Link account'
+                    )}
+                  </button>
+                </form>
+              )}
+            </section>
 
-            <div className="rounded-lg border border-ink-800 bg-ink-950/40 p-4 space-y-4">
-              <div className="flex items-start justify-between gap-4">
+            {/* GitHub auto-scan / import */}
+            <section className="surface p-5 sm:p-6">
+              <h2 className="text-base font-semibold text-white mb-1">
+                GitHub auto-discovery
+              </h2>
+              <p className="hint !mt-0 mb-5">
+                Periodically scan the linked account for new stars and owned repositories.
+                Enable auto-import to mirror anything not yet archived. Requires a linked
+                GitHub token.
+              </p>
+
+              <div
+                className={`space-y-5 ${!ghAccount ? 'opacity-40 pointer-events-none' : ''}`}
+              >
                 <div>
-                  <p className="text-sm font-medium text-ink-100">Scan starred repos</p>
-                  <p className="hint !mt-1">
-                    Refresh star lists and detect newly starred repositories.
-                  </p>
-                </div>
-                <Toggle
-                  checked={draft.auto_scan_stars_enabled}
-                  onChange={(v) =>
-                    setDraft({
-                      ...draft,
-                      auto_scan_stars_enabled: v,
-                      ...(v ? {} : { auto_import_stars_enabled: false }),
-                    })
-                  }
-                  label="Scan stars"
-                />
-              </div>
-              <div className="flex items-start justify-between gap-4 pl-0 sm:pl-2">
-                <div>
-                  <p className="text-sm font-medium text-ink-200">Auto-import new stars</p>
-                  <p className="hint !mt-1">
-                    Clone and archive stars that are not already in the vault. Also
-                    updates list membership for existing mirrors.
-                  </p>
-                </div>
-                <Toggle
-                  checked={draft.auto_import_stars_enabled}
-                  onChange={(v) =>
-                    setDraft({
-                      ...draft,
-                      auto_import_stars_enabled: v,
-                      ...(v ? { auto_scan_stars_enabled: true } : {}),
-                    })
-                  }
-                  label="Auto-import stars"
-                />
-              </div>
-              {draft.auto_import_stars_enabled && ghLists.filter(l => l.github_list_id).length > 0 && (
-                <div className="pt-2 border-t border-ink-800/80 pl-0 sm:pl-2">
-                  <p className="text-xs text-ink-400 mb-2">
-                    Only auto-import stars in selected lists (select none to import all):
-                  </p>
-                  <div className="space-y-1.5 max-h-48 overflow-y-auto">
-                    {ghLists.filter(l => l.github_list_id).map((list) => {
-                      const checked = (draft.auto_import_stars_list_ids || []).includes(list.github_list_id!);
+                  <label className="label">Scan frequency</label>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {intervals.map((h) => {
+                      const selected = draft.github_scan_interval_hours === h;
                       return (
-                        <label
-                          key={list.id}
-                          className="flex items-center gap-2 text-sm text-ink-300 cursor-pointer"
+                        <button
+                          key={h}
+                          type="button"
+                          onClick={() =>
+                            setDraft({ ...draft, github_scan_interval_hours: h })
+                          }
+                          className={`rounded-lg border px-3 py-2.5 text-left text-sm transition-all ${
+                            selected
+                              ? 'border-amber-400/50 bg-amber-400/10 text-amber-300 shadow-glow'
+                              : 'border-ink-700 bg-ink-950/50 text-ink-300 hover:border-ink-600'
+                          }`}
                         >
-                          <input
-                            type="checkbox"
-                            className="rounded border-ink-600 bg-ink-950 text-amber-400"
-                            checked={checked}
-                            onChange={() => {
-                              const ids = draft.auto_import_stars_list_ids || [];
-                              setDraft({
-                                ...draft,
-                                auto_import_stars_list_ids: checked
-                                  ? ids.filter(id => id !== list.github_list_id)
-                                  : [...ids, list.github_list_id!],
-                              });
-                            }}
-                          />
-                          {list.name}
-                        </label>
+                          <span className="block font-medium">
+                            {INTERVAL_LABELS[h] || `Every ${h}h`}
+                          </span>
+                          <span className="block text-[11px] text-ink-500 mt-0.5 font-mono">
+                            {h}h
+                          </span>
+                        </button>
                       );
                     })}
                   </div>
                 </div>
-              )}
-            </div>
 
-            <div className="rounded-lg border border-ink-800 bg-ink-950/40 p-4 space-y-4">
-              <div className="flex items-start justify-between gap-4">
+                <div className="rounded-lg border border-ink-800 bg-ink-950/40 p-4 space-y-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-medium text-ink-100">Scan starred repos</p>
+                      <p className="hint !mt-1">
+                        Refresh star lists and detect newly starred repositories.
+                      </p>
+                    </div>
+                    <Toggle
+                      checked={draft.auto_scan_stars_enabled}
+                      onChange={(v) =>
+                        setDraft({
+                          ...draft,
+                          auto_scan_stars_enabled: v,
+                          ...(v ? {} : { auto_import_stars_enabled: false }),
+                        })
+                      }
+                      label="Scan stars"
+                    />
+                  </div>
+                  <div className="flex items-start justify-between gap-4 pl-0 sm:pl-2">
+                    <div>
+                      <p className="text-sm font-medium text-ink-200">Auto-import new stars</p>
+                      <p className="hint !mt-1">
+                        Clone and archive stars that are not already in the vault. Also
+                        updates list membership for existing mirrors.
+                      </p>
+                    </div>
+                    <Toggle
+                      checked={draft.auto_import_stars_enabled}
+                      onChange={(v) =>
+                        setDraft({
+                          ...draft,
+                          auto_import_stars_enabled: v,
+                          ...(v ? { auto_scan_stars_enabled: true } : {}),
+                        })
+                      }
+                      label="Auto-import stars"
+                    />
+                  </div>
+                  {draft.auto_import_stars_enabled && ghLists.filter(l => l.github_list_id).length > 0 && (
+                    <div className="pt-2 border-t border-ink-800/80 pl-0 sm:pl-2">
+                      <p className="text-xs text-ink-400 mb-2">
+                        Only auto-import stars in selected lists (select none to import all):
+                      </p>
+                      <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                        {ghLists.filter(l => l.github_list_id).map((list) => {
+                          const checked = (draft.auto_import_stars_list_ids || []).includes(list.github_list_id!);
+                          return (
+                            <label
+                              key={list.id}
+                              className="flex items-center gap-2 text-sm text-ink-300 cursor-pointer"
+                            >
+                              <input
+                                type="checkbox"
+                                className="rounded border-ink-600 bg-ink-950 text-amber-400"
+                                checked={checked}
+                                onChange={() => {
+                                  const ids = draft.auto_import_stars_list_ids || [];
+                                  setDraft({
+                                    ...draft,
+                                    auto_import_stars_list_ids: checked
+                                      ? ids.filter(id => id !== list.github_list_id)
+                                      : [...ids, list.github_list_id!],
+                                  });
+                                }}
+                              />
+                              {list.name}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-lg border border-ink-800 bg-ink-950/40 p-4 space-y-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-medium text-ink-100">Scan owned repos</p>
+                      <p className="hint !mt-1">
+                        Discover repositories owned by @{ghAccount?.username || 'you'}{' '}
+                        (affiliation=owner).
+                      </p>
+                    </div>
+                    <Toggle
+                      checked={draft.auto_scan_owned_enabled}
+                      onChange={(v) =>
+                        setDraft({
+                          ...draft,
+                          auto_scan_owned_enabled: v,
+                          ...(v ? {} : { auto_import_owned_enabled: false }),
+                        })
+                      }
+                      label="Scan owned"
+                    />
+                  </div>
+                  <div className="flex items-start justify-between gap-4 pl-0 sm:pl-2">
+                    <div>
+                      <p className="text-sm font-medium text-ink-200">Auto-import owned</p>
+                      <p className="hint !mt-1">
+                        Mirror owned repos not yet archived. Tagged with an{' '}
+                        <span className="font-mono">Owned</span> list.
+                      </p>
+                    </div>
+                    <Toggle
+                      checked={draft.auto_import_owned_enabled}
+                      onChange={(v) =>
+                        setDraft({
+                          ...draft,
+                          auto_import_owned_enabled: v,
+                          ...(v ? { auto_scan_owned_enabled: true } : {}),
+                        })
+                      }
+                      label="Auto-import owned"
+                    />
+                  </div>
+                  <div className="flex flex-col sm:flex-row gap-4 pt-1 border-t border-ink-800/80">
+                    <label className="flex items-center gap-2 text-sm text-ink-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="rounded border-ink-600 bg-ink-950 text-amber-400"
+                        checked={draft.auto_import_owned_include_forks}
+                        onChange={(e) =>
+                          setDraft({
+                            ...draft,
+                            auto_import_owned_include_forks: e.target.checked,
+                          })
+                        }
+                      />
+                      Include forks
+                    </label>
+                    <label className="flex items-center gap-2 text-sm text-ink-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="rounded border-ink-600 bg-ink-950 text-amber-400"
+                        checked={draft.auto_import_owned_include_private}
+                        onChange={(e) =>
+                          setDraft({
+                            ...draft,
+                            auto_import_owned_include_private: e.target.checked,
+                          })
+                        }
+                      />
+                      Include private
+                    </label>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={!ghAccount || scanBusy !== null}
+                    onClick={() => runGithubScan('stars')}
+                  >
+                    {scanBusy === 'stars' ? (
+                      <>
+                        <Spinner /> Scanning stars…
+                      </>
+                    ) : (
+                      'Scan stars now'
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={!ghAccount || scanBusy !== null}
+                    onClick={() => runGithubScan('owned')}
+                  >
+                    {scanBusy === 'owned' ? (
+                      <>
+                        <Spinner /> Scanning owned…
+                      </>
+                    ) : (
+                      'Scan owned now'
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={!ghAccount || scanBusy !== null}
+                    onClick={() => runGithubScan('both')}
+                  >
+                    {scanBusy === 'both' ? (
+                      <>
+                        <Spinner /> Scanning…
+                      </>
+                    ) : (
+                      'Scan all now'
+                    )}
+                  </button>
+                </div>
+                {!ghAccount && (
+                  <p className="hint">Link a GitHub account above to enable discovery.</p>
+                )}
+              </div>
+            </section>
+
+            {/* Auto-sync */}
+            <section className="surface p-5 sm:p-6">
+              <div className="flex items-start justify-between gap-4 mb-5">
                 <div>
-                  <p className="text-sm font-medium text-ink-100">Scan owned repos</p>
+                  <h2 className="text-base font-semibold text-white">Archive updates</h2>
                   <p className="hint !mt-1">
-                    Discover repositories owned by @{ghAccount?.username || 'you'}{' '}
-                    (affiliation=owner).
+                    Automatically re-fetch git mirrors and releases on a schedule.
                   </p>
                 </div>
                 <Toggle
-                  checked={draft.auto_scan_owned_enabled}
-                  onChange={(v) =>
-                    setDraft({
-                      ...draft,
-                      auto_scan_owned_enabled: v,
-                      ...(v ? {} : { auto_import_owned_enabled: false }),
-                    })
-                  }
-                  label="Scan owned"
+                  checked={draft.auto_sync_enabled}
+                  onChange={(v) => setDraft({ ...draft, auto_sync_enabled: v })}
+                  label="Enable auto-sync"
                 />
               </div>
-              <div className="flex items-start justify-between gap-4 pl-0 sm:pl-2">
+
+              <div
+                className={`space-y-5 transition-opacity ${
+                  draft.auto_sync_enabled ? 'opacity-100' : 'opacity-40 pointer-events-none'
+                }`}
+              >
                 <div>
-                  <p className="text-sm font-medium text-ink-200">Auto-import owned</p>
-                  <p className="hint !mt-1">
-                    Mirror owned repos not yet archived. Tagged with an{' '}
-                    <span className="font-mono">Owned</span> list.
+                  <label className="label" htmlFor="interval">
+                    Sync frequency
+                  </label>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {intervals.map((h) => {
+                      const selected = draft.sync_interval_hours === h;
+                      return (
+                        <button
+                          key={h}
+                          type="button"
+                          onClick={() => setDraft({ ...draft, sync_interval_hours: h })}
+                          className={`rounded-lg border px-3 py-2.5 text-left text-sm transition-all ${
+                            selected
+                              ? 'border-amber-400/50 bg-amber-400/10 text-amber-300 shadow-glow'
+                              : 'border-ink-700 bg-ink-950/50 text-ink-300 hover:border-ink-600'
+                          }`}
+                        >
+                          <span className="block font-medium">
+                            {INTERVAL_LABELS[h] || `Every ${h}h`}
+                          </span>
+                          <span className="block text-[11px] text-ink-500 mt-0.5 font-mono">
+                            {h}h
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="hint">
+                    Each repository is only re-synced once its last sync is older than this
+                    interval.
                   </p>
                 </div>
-                <Toggle
-                  checked={draft.auto_import_owned_enabled}
-                  onChange={(v) =>
-                    setDraft({
-                      ...draft,
-                      auto_import_owned_enabled: v,
-                      ...(v ? { auto_scan_owned_enabled: true } : {}),
-                    })
-                  }
-                  label="Auto-import owned"
-                />
               </div>
-              <div className="flex flex-col sm:flex-row gap-4 pt-1 border-t border-ink-800/80">
-                <label className="flex items-center gap-2 text-sm text-ink-300 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    className="rounded border-ink-600 bg-ink-950 text-amber-400"
-                    checked={draft.auto_import_owned_include_forks}
-                    onChange={(e) =>
-                      setDraft({
-                        ...draft,
-                        auto_import_owned_include_forks: e.target.checked,
-                      })
-                    }
-                  />
-                  Include forks
-                </label>
-                <label className="flex items-center gap-2 text-sm text-ink-300 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    className="rounded border-ink-600 bg-ink-950 text-amber-400"
-                    checked={draft.auto_import_owned_include_private}
-                    onChange={(e) =>
-                      setDraft({
-                        ...draft,
-                        auto_import_owned_include_private: e.target.checked,
-                      })
-                    }
-                  />
-                  Include private
-                </label>
-              </div>
-            </div>
+            </section>
 
-            <div className="flex flex-wrap gap-2 pt-1">
-              <button
-                type="button"
-                className="btn-secondary"
-                disabled={!ghAccount || scanBusy !== null}
-                onClick={() => runGithubScan('stars')}
-              >
-                {scanBusy === 'stars' ? (
-                  <>
-                    <Spinner /> Scanning stars…
-                  </>
-                ) : (
-                  'Scan stars now'
-                )}
-              </button>
-              <button
-                type="button"
-                className="btn-secondary"
-                disabled={!ghAccount || scanBusy !== null}
-                onClick={() => runGithubScan('owned')}
-              >
-                {scanBusy === 'owned' ? (
-                  <>
-                    <Spinner /> Scanning owned…
-                  </>
-                ) : (
-                  'Scan owned now'
-                )}
-              </button>
-              <button
-                type="button"
-                className="btn-secondary"
-                disabled={!ghAccount || scanBusy !== null}
-                onClick={() => runGithubScan('both')}
-              >
-                {scanBusy === 'both' ? (
-                  <>
-                    <Spinner /> Scanning…
-                  </>
-                ) : (
-                  'Scan all now'
-                )}
-              </button>
-            </div>
-            {!ghAccount && (
-              <p className="hint">Link a GitHub account above to enable discovery.</p>
-            )}
-          </div>
-        </section>
-
-        {/* Auto-sync */}
-        <section className="surface p-5 sm:p-6">
-          <div className="flex items-start justify-between gap-4 mb-5">
-            <div>
-              <h2 className="text-base font-semibold text-white">Archive updates</h2>
-              <p className="hint !mt-1">
-                Automatically re-fetch git mirrors and releases on a schedule.
+            {/* Releases */}
+            <section className="surface p-5 sm:p-6">
+              <h2 className="text-base font-semibold text-white mb-1">Release assets</h2>
+              <p className="hint !mt-0 mb-5">
+                Control whether binary assets from GitHub, GitLab, Codeberg, or other
+                release hosts are stored locally.
               </p>
-            </div>
-            <Toggle
-              checked={draft.auto_sync_enabled}
-              onChange={(v) => setDraft({ ...draft, auto_sync_enabled: v })}
-              label="Enable auto-sync"
-            />
-          </div>
 
-          <div
-            className={`space-y-5 transition-opacity ${
-              draft.auto_sync_enabled ? 'opacity-100' : 'opacity-40 pointer-events-none'
-            }`}
-          >
-            <div>
-              <label className="label" htmlFor="interval">
-                Sync frequency
-              </label>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                {intervals.map((h) => {
-                  const selected = draft.sync_interval_hours === h;
-                  return (
-                    <button
-                      key={h}
-                      type="button"
-                      onClick={() => setDraft({ ...draft, sync_interval_hours: h })}
-                      className={`rounded-lg border px-3 py-2.5 text-left text-sm transition-all ${
-                        selected
-                          ? 'border-amber-400/50 bg-amber-400/10 text-amber-300 shadow-glow'
-                          : 'border-ink-700 bg-ink-950/50 text-ink-300 hover:border-ink-600'
-                      }`}
+              <div className="flex items-start justify-between gap-4 mb-5">
+                <div>
+                  <p className="text-sm font-medium text-ink-200">Download assets</p>
+                  <p className="hint !mt-1">
+                    When off, release metadata is still archived but files are not downloaded.
+                  </p>
+                </div>
+                <Toggle
+                  checked={draft.download_release_assets}
+                  onChange={(v) => setDraft({ ...draft, download_release_assets: v })}
+                  label="Download release assets"
+                />
+              </div>
+
+              <div
+                className={
+                  draft.download_release_assets ? '' : 'opacity-40 pointer-events-none'
+                }
+              >
+                <label className="label" htmlFor="max-asset">
+                  Max asset size (MB)
+                </label>
+                <input
+                  id="max-asset"
+                  type="number"
+                  min={0}
+                  className="input max-w-[12rem]"
+                  value={draft.max_asset_size_mb}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      max_asset_size_mb: Math.max(0, parseInt(e.target.value || '0', 10)),
+                    })
+                  }
+                />
+                <p className="hint">
+                  Assets larger than this are skipped. Use{' '}
+                  <span className="font-mono">0</span>{' '}
+                  for no limit.
+                  {draft.global_max_asset_size_mb > 0 && (
+                    <>
+                      {' '}Global cap:{' '}
+                      <span className="font-mono">{draft.global_max_asset_size_mb} MB</span>
+                    </>
+                  )}
+                </p>
+
+                <div className="mt-6 pt-5 border-t border-ink-800/80">
+                  <h3 className="text-sm font-medium text-ink-200 mb-1">
+                    Extra download domains
+                  </h3>
+                  <p className="hint !mt-0 mb-4">
+                    When a Forgejo (or similar) host serves release assets from a
+                    different domain, you&apos;ll get a popup to approve or reject
+                    it. Manage those decisions here.
+                  </p>
+
+                  {approvedHosts.length === 0 && rejectedHosts.length === 0 ? (
+                    <p className="text-xs text-ink-500">
+                      No approved or rejected domains yet.
+                    </p>
+                  ) : (
+                    <div className="space-y-4">
+                      {approvedHosts.length > 0 && (
+                        <div>
+                          <p className="text-[11px] uppercase tracking-wide text-ink-500 mb-2">
+                            Approved
+                          </p>
+                          <ul className="space-y-1.5">
+                            {approvedHosts.map((h) => (
+                              <li
+                                key={h}
+                                className="flex items-center justify-between gap-3 rounded-lg border border-ink-800 bg-ink-950/40 px-3 py-2"
+                              >
+                                <span className="font-mono text-sm text-mint-400 break-all">
+                                  {h}
+                                </span>
+                                <button
+                                  type="button"
+                                  className="btn-ghost !py-1 !px-2 text-xs shrink-0"
+                                  disabled={hostBusy === h}
+                                  onClick={() => revokeHost(h)}
+                                >
+                                  {hostBusy === h ? '…' : 'Revoke'}
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {rejectedHosts.length > 0 && (
+                        <div>
+                          <p className="text-[11px] uppercase tracking-wide text-ink-500 mb-2">
+                            Rejected
+                          </p>
+                          <ul className="space-y-1.5">
+                            {rejectedHosts.map((h) => (
+                              <li
+                                key={h}
+                                className="flex items-center justify-between gap-3 rounded-lg border border-ink-800 bg-ink-950/40 px-3 py-2"
+                              >
+                                <span className="font-mono text-sm text-ink-400 break-all">
+                                  {h}
+                                </span>
+                                <button
+                                  type="button"
+                                  className="btn-ghost !py-1 !px-2 text-xs shrink-0"
+                                  disabled={hostBusy === h}
+                                  onClick={() => revokeHost(h)}
+                                >
+                                  {hostBusy === h ? '…' : 'Revoke'}
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </section>
+
+            {/* Alerts / Apprise — user-facing */}
+            <section className="surface p-5 sm:p-6">
+              <div className="flex items-start justify-between gap-4 mb-5">
+                <div>
+                  <h2 className="text-base font-semibold text-white">Alerts (Apprise)</h2>
+                  <p className="hint !mt-1">
+                    Notify Discord, Telegram, email, and{' '}
+                    <a
+                      href="https://github.com/caronc/apprise#supported-notifications"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-amber-400 hover:text-amber-300 underline underline-offset-2"
                     >
-                      <span className="block font-medium">
-                        {INTERVAL_LABELS[h] || `Every ${h}h`}
-                      </span>
-                      <span className="block text-[11px] text-ink-500 mt-0.5 font-mono">
-                        {h}h
-                      </span>
-                    </button>
-                  );
-                })}
+                      100+ other services
+                    </a>{' '}
+                    via an{' '}
+                    <a
+                      href="https://github.com/caronc/apprise-api"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-amber-400 hover:text-amber-300 underline underline-offset-2"
+                    >
+                      Apprise API
+                    </a>{' '}
+                    instance when major archive events occur.
+                  </p>
+                </div>
+                <Toggle
+                  checked={draft.alerts_enabled}
+                  onChange={(v) => setDraft({ ...draft, alerts_enabled: v })}
+                  label="Enable alerts"
+                />
               </div>
-              <p className="hint">
-                Each repository is only re-synced once its last sync is older than this
-                interval.
-              </p>
-            </div>
 
-            <div>
-              <label className="label" htmlFor="concurrent">
-                Concurrent syncs
-              </label>
-              {isAdmin ? (
-                <>
+              <div
+                className={`space-y-5 transition-opacity ${
+                  draft.alerts_enabled ? 'opacity-100' : 'opacity-40 pointer-events-none'
+                }`}
+              >
+                <div>
+                  <label className="label" htmlFor="apprise-config-key">
+                    Config key (optional)
+                  </label>
+                  <input
+                    id="apprise-config-key"
+                    type="text"
+                    className="input font-mono text-[13px] max-w-xs"
+                    value={draft.apprise_config_key}
+                    onChange={(e) =>
+                      setDraft({ ...draft, apprise_config_key: e.target.value })
+                    }
+                    placeholder="apprise"
+                    autoComplete="off"
+                  />
+                  <p className="hint">
+                    When set, notifications go to{' '}
+                    <span className="font-mono">/notify/&#123;key&#125;</span> using URLs
+                    stored in Apprise. Leave empty to use stateless mode with the URLs
+                    below.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="label" htmlFor="apprise-urls">
+                    Apprise URLs (stateless)
+                  </label>
+                  <textarea
+                    id="apprise-urls"
+                    className="input font-mono text-[13px] min-h-[5.5rem] resize-y"
+                    value={appriseUrlsText}
+                    onChange={(e) => setAppriseUrlsText(e.target.value)}
+                    placeholder={
+                      'discord://webhook_id/webhook_token\ntgram://bottoken/ChatID\nmailto://user:pass@smtp.example.com'
+                    }
+                    spellCheck={false}
+                  />
+                  <p className="hint">
+                    One URL per line. Used when no config key is set. See{' '}
+                    <a
+                      href="https://github.com/caronc/apprise/wiki"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-amber-400 hover:text-amber-300 underline underline-offset-2"
+                    >
+                      Apprise wiki
+                    </a>{' '}
+                    for URL formats.
+                  </p>
+                </div>
+
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-sm font-medium text-ink-200">Use category tags</p>
+                    <p className="hint !mt-1">
+                      Pass the alert category as an Apprise <span className="font-mono">tag</span>{' '}
+                      so destinations can be filtered (e.g. only critical events to PagerDuty).
+                      Tag names match the category ids below (
+                      <span className="font-mono">new_release</span>,{' '}
+                      <span className="font-mono">storage_low</span>, …).
+                    </p>
+                  </div>
+                  <Toggle
+                    checked={draft.apprise_use_tags}
+                    onChange={(v) => setDraft({ ...draft, apprise_use_tags: v })}
+                    label="Use Apprise tags"
+                  />
+                </div>
+
+                <div>
+                  <p className="label mb-2">Archive events</p>
+                  <div className="rounded-lg border border-ink-800 bg-ink-950/40 divide-y divide-ink-800/80">
+                    {ALERT_CATEGORY_ROWS.filter((r) => r.group === 'archive').map((row) => (
+                      <div
+                        key={row.key}
+                        className="flex items-start justify-between gap-4 px-4 py-3"
+                      >
+                        <div>
+                          <p className="text-sm font-medium text-ink-100">{row.label}</p>
+                          <p className="hint !mt-0.5">{row.description}</p>
+                          <p className="text-[11px] font-mono text-ink-600 mt-0.5">
+                            tag: {row.key.replace(/^alert_/, '')}
+                          </p>
+                        </div>
+                        <Toggle
+                          checked={Boolean(draft[row.key])}
+                          onChange={(v) => setDraft({ ...draft, [row.key]: v })}
+                          label={row.label}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3 pt-1">
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={sendTestAlert}
+                    disabled={testBusy || !draft.alerts_enabled}
+                  >
+                    {testBusy ? (
+                      <>
+                        <Spinner /> Sending test…
+                      </>
+                    ) : (
+                      'Send test notification'
+                    )}
+                  </button>
+                  <span className="text-xs text-ink-500">
+                    {alertsConfigured ||
+                    (draft.apprise_api_url.trim() &&
+                      (draft.apprise_config_key.trim() ||
+                        appriseUrlsText.trim())) ? (
+                      <span className="text-mint-400">Apprise looks configured</span>
+                    ) : (
+                      isAdmin
+                        ? 'Set Apprise API URL on the Admin tab, plus config key or URLs'
+                        : 'Save config key or URLs (API URL set by admin), then test'
+                    )}
+                  </span>
+                </div>
+              </div>
+            </section>
+
+            {/* Scheduler status */}
+            <section className="surface p-5 sm:p-6">
+              <h2 className="text-base font-semibold text-white mb-4">Scheduler status</h2>
+              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                <StatusRow
+                  label="Process"
+                  value={
+                    scheduler?.started ? (
+                      <span className="text-mint-400">running</span>
+                    ) : (
+                      <span className="text-ink-500">not started</span>
+                    )
+                  }
+                />
+                <StatusRow
+                  label="Current job"
+                  value={
+                    scheduler?.running ? (
+                      <span className="text-amber-300">syncing…</span>
+                    ) : (
+                      <span className="text-ink-400">idle</span>
+                    )
+                  }
+                />
+                <StatusRow
+                  label="Last run"
+                  value={
+                    scheduler?.last_run_at ? (
+                      <span className="font-mono text-xs">
+                        {formatDate(scheduler.last_run_at)}
+                      </span>
+                    ) : (
+                      <span className="text-ink-500">never</span>
+                    )
+                  }
+                />
+                <StatusRow
+                  label="Last result"
+                  value={
+                    <span className="text-ink-400 text-xs">
+                      {scheduler?.last_run_summary || '—'}
+                    </span>
+                  }
+                />
+                <StatusRow
+                  label="Last GitHub scan"
+                  value={
+                    scheduler?.last_github_scan_at ? (
+                      <span className="font-mono text-xs">
+                        {formatDate(scheduler.last_github_scan_at)}
+                      </span>
+                    ) : (
+                      <span className="text-ink-500">never</span>
+                    )
+                  }
+                />
+                <StatusRow
+                  label="GitHub scan result"
+                  value={
+                    <span className="text-ink-400 text-xs">
+                      {scheduler?.last_github_scan_summary || '—'}
+                    </span>
+                  }
+                />
+              </dl>
+
+              <div className="mt-5 pt-5 border-t border-ink-800">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={runAllNow}
+                  disabled={runningAll || scheduler?.running}
+                >
+                  {runningAll || scheduler?.running ? (
+                    <>
+                      <Spinner /> Syncing all repos…
+                    </>
+                  ) : (
+                    'Sync all repositories now'
+                  )}
+                </button>
+                <p className="hint">
+                  Forces a full pass over every archived repository, ignoring the interval.
+                </p>
+              </div>
+            </section>
+          </>
+        )}
+
+        {activeTab === 'admin' && isAdmin && (
+          <>
+            {/* Instance limits */}
+            <section className="surface p-5 sm:p-6">
+              <h2 className="text-base font-semibold text-white mb-1">Instance limits</h2>
+              <p className="hint !mt-0 mb-5">
+                Server-wide knobs that affect sync concurrency and asset downloads for all users.
+              </p>
+
+              <div className="space-y-5">
+                <div>
+                  <label className="label" htmlFor="concurrent">
+                    Concurrent syncs
+                  </label>
                   <select
                     id="concurrent"
                     className="input max-w-[12rem]"
@@ -906,540 +1361,33 @@ export default function SettingsClient({
                   </select>
                   <p className="hint">
                     Higher values finish large archives faster but use more disk and network.
+                    {scheduler?.adjusted_concurrency != null &&
+                      scheduler.adjusted_concurrency !== draft.concurrent_syncs && (
+                        <>
+                          {' '}Effective now:{' '}
+                          <span className="font-mono">
+                            {scheduler.adjusted_concurrency}
+                          </span>{' '}
+                          (memory-adjusted).
+                        </>
+                      )}
                   </p>
-                </>
-              ) : (
-                <p className="text-sm text-ink-500 font-mono">
-                  {draft.concurrent_syncs} at a time{' '}
-                  <span className="text-ink-600">(set by admin)</span>
-                </p>
-              )}
-            </div>
-          </div>
-        </section>
-
-        {/* Releases */}
-        <section className="surface p-5 sm:p-6">
-          <h2 className="text-base font-semibold text-white mb-1">Release assets</h2>
-          <p className="hint !mt-0 mb-5">
-            Control whether binary assets from GitHub, GitLab, Codeberg, or other
-            release hosts are stored locally.
-          </p>
-
-          <div className="flex items-start justify-between gap-4 mb-5">
-            <div>
-              <p className="text-sm font-medium text-ink-200">Download assets</p>
-              <p className="hint !mt-1">
-                When off, release metadata is still archived but files are not downloaded.
-              </p>
-            </div>
-            <Toggle
-              checked={draft.download_release_assets}
-              onChange={(v) => setDraft({ ...draft, download_release_assets: v })}
-              label="Download release assets"
-            />
-          </div>
-
-          <div
-            className={
-              draft.download_release_assets ? '' : 'opacity-40 pointer-events-none'
-            }
-          >
-            {isAdmin && (
-              <div className="mb-5">
-                <label className="label" htmlFor="global-max-asset">
-                  Global max asset size (MB)
-                </label>
-                <input
-                  id="global-max-asset"
-                  type="number"
-                  min={0}
-                  className="input max-w-[12rem]"
-                  value={draft.global_max_asset_size_mb}
-                  onChange={(e) =>
-                    setDraft({
-                      ...draft,
-                      global_max_asset_size_mb: Math.max(
-                        0,
-                        parseInt(e.target.value || '0', 10)
-                      ),
-                    })
-                  }
-                />
-                <p className="hint">
-                  Upper bound for all users&rsquo; per-user asset size limits.{' '}
-                  <span className="font-mono">0</span> = no global limit.
-                </p>
-              </div>
-            )}
-            <label className="label" htmlFor="max-asset">
-              Max asset size (MB)
-            </label>
-            <input
-              id="max-asset"
-              type="number"
-              min={0}
-              className="input max-w-[12rem]"
-              value={draft.max_asset_size_mb}
-              onChange={(e) =>
-                setDraft({
-                  ...draft,
-                  max_asset_size_mb: Math.max(0, parseInt(e.target.value || '0', 10)),
-                })
-              }
-            />
-            <p className="hint">
-              Assets larger than this are skipped. Use{' '}
-              <span className="font-mono">0</span>{' '}
-              for no limit.
-              {draft.global_max_asset_size_mb > 0 && (
-                <>
-                  {' '}Global cap:{' '}
-                  <span className="font-mono">{draft.global_max_asset_size_mb} MB</span>
-                </>
-              )}
-            </p>
-
-            <div className="mt-6 pt-5 border-t border-ink-800/80">
-              <h3 className="text-sm font-medium text-ink-200 mb-1">
-                Extra download domains
-              </h3>
-              <p className="hint !mt-0 mb-4">
-                When a Forgejo (or similar) host serves release assets from a
-                different domain, you&apos;ll get a popup to approve or reject
-                it. Manage those decisions here.
-              </p>
-
-              {approvedHosts.length === 0 && rejectedHosts.length === 0 ? (
-                <p className="text-xs text-ink-500">
-                  No approved or rejected domains yet.
-                </p>
-              ) : (
-                <div className="space-y-4">
-                  {approvedHosts.length > 0 && (
-                    <div>
-                      <p className="text-[11px] uppercase tracking-wide text-ink-500 mb-2">
-                        Approved
-                      </p>
-                      <ul className="space-y-1.5">
-                        {approvedHosts.map((h) => (
-                          <li
-                            key={h}
-                            className="flex items-center justify-between gap-3 rounded-lg border border-ink-800 bg-ink-950/40 px-3 py-2"
-                          >
-                            <span className="font-mono text-sm text-mint-400 break-all">
-                              {h}
-                            </span>
-                            <button
-                              type="button"
-                              className="btn-ghost !py-1 !px-2 text-xs shrink-0"
-                              disabled={hostBusy === h}
-                              onClick={() => revokeHost(h)}
-                            >
-                              {hostBusy === h ? '…' : 'Revoke'}
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {rejectedHosts.length > 0 && (
-                    <div>
-                      <p className="text-[11px] uppercase tracking-wide text-ink-500 mb-2">
-                        Rejected
-                      </p>
-                      <ul className="space-y-1.5">
-                        {rejectedHosts.map((h) => (
-                          <li
-                            key={h}
-                            className="flex items-center justify-between gap-3 rounded-lg border border-ink-800 bg-ink-950/40 px-3 py-2"
-                          >
-                            <span className="font-mono text-sm text-ink-400 break-all">
-                              {h}
-                            </span>
-                            <button
-                              type="button"
-                              className="btn-ghost !py-1 !px-2 text-xs shrink-0"
-                              disabled={hostBusy === h}
-                              onClick={() => revokeHost(h)}
-                            >
-                              {hostBusy === h ? '…' : 'Revoke'}
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
                 </div>
-              )}
-            </div>
-          </div>
-        </section>
 
-        {/* Memory awareness — admin only */}
-        {isAdmin && (
-          <section className="surface p-5 sm:p-6">
-          <div className="flex items-start justify-between gap-4 mb-5">
-            <div>
-              <h2 className="text-base font-semibold text-white">Memory limits</h2>
-              <p className="hint !mt-1">
-                Dynamically adjust job concurrency and defer heavy operations when system
-                memory is low.
-              </p>
-            </div>
-            <Toggle
-              checked={draft.memory_aware_enabled}
-              onChange={(v) => setDraft({ ...draft, memory_aware_enabled: v })}
-              label="Enable memory-aware scheduling"
-            />
-          </div>
-
-          <div
-            className={`space-y-5 transition-opacity ${
-              draft.memory_aware_enabled
-                ? 'opacity-100'
-                : 'opacity-40 pointer-events-none'
-            }`}
-          >
-            <div>
-              <label className="label" htmlFor="min-free-memory">
-                Minimum free memory (MB)
-              </label>
-              <input
-                id="min-free-memory"
-                type="number"
-                min={64}
-                max={65536}
-                step={64}
-                className="input max-w-[12rem]"
-                value={draft.min_free_memory_mb}
-                onChange={(e) =>
-                  setDraft({
-                    ...draft,
-                    min_free_memory_mb: Math.max(
-                      64,
-                      parseInt(e.target.value || '256', 10)
-                    ),
-                  })
-                }
-              />
-              <p className="hint">
-                New jobs are deferred when free memory drops below this threshold.
-              </p>
-            </div>
-
-            <div>
-              <label className="label" htmlFor="max-memory-ratio">
-                Max memory usage ratio
-              </label>
-              <div className="flex items-center gap-3">
-                <input
-                  id="max-memory-ratio"
-                  type="range"
-                  min={0.5}
-                  max={1}
-                  step={0.05}
-                  className="w-48"
-                  value={draft.max_memory_usage_ratio}
-                  onChange={(e) =>
-                    setDraft({
-                      ...draft,
-                      max_memory_usage_ratio: parseFloat(e.target.value),
-                    })
-                  }
-                />
-                <span className="font-mono text-sm text-ink-300 tabular-nums w-10">
-                  {Math.round(draft.max_memory_usage_ratio * 100)}%
-                </span>
-              </div>
-              <p className="hint">
-                Jobs are paused when total memory usage exceeds this fraction of
-                available RAM (including cgroup limits in Docker).
-              </p>
-            </div>
-
-            {scheduler?.memory_info && (
-              <div className="rounded-lg border border-ink-800 bg-ink-950/40 p-4">
-                <p className="text-xs text-ink-500 mb-2 uppercase tracking-wide">
-                  Current memory
-                </p>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
-                  <div>
-                    <span className="text-ink-500">Total</span>
-                    <br />
-                    <span className="font-mono tabular-nums">
-                      {scheduler.memory_info.totalMB} MB
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-ink-500">Free</span>
-                    <br />
-                    <span className="font-mono tabular-nums">
-                      {scheduler.memory_info.freeMB} MB
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-ink-500">Heap</span>
-                    <br />
-                    <span className="font-mono tabular-nums">
-                      {scheduler.memory_info.heapUsedMB} MB
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-ink-500">Effective concurrency</span>
-                    <br />
-                    <span className="font-mono tabular-nums">
-                      {scheduler.adjusted_concurrency ?? draft.concurrent_syncs}
-                    </span>
-                  </div>
-                </div>
-                {scheduler.memory_info.cgroupLimited && (
-                  <p className="text-xs text-amber-400/70 mt-2">
-                    Running under a cgroup memory limit (Docker/container).
-                  </p>
-                )}
-              </div>
-            )}
-          </div>
-        </section>
-        )}
-
-        {/* Alerts / Apprise */}
-        <section className="surface p-5 sm:p-6">
-          <div className="flex items-start justify-between gap-4 mb-5">
-            <div>
-              <h2 className="text-base font-semibold text-white">Alerts (Apprise)</h2>
-              <p className="hint !mt-1">
-                Notify Discord, Telegram, email, and{' '}
-                <a
-                  href="https://github.com/caronc/apprise#supported-notifications"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-amber-400 hover:text-amber-300 underline underline-offset-2"
-                >
-                  100+ other services
-                </a>{' '}
-                via an{' '}
-                <a
-                  href="https://github.com/caronc/apprise-api"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-amber-400 hover:text-amber-300 underline underline-offset-2"
-                >
-                  Apprise API
-                </a>{' '}
-                instance when major archive or system events occur.
-              </p>
-            </div>
-            <Toggle
-              checked={draft.alerts_enabled}
-              onChange={(v) => setDraft({ ...draft, alerts_enabled: v })}
-              label="Enable alerts"
-            />
-          </div>
-
-          <div
-            className={`space-y-5 transition-opacity ${
-              draft.alerts_enabled ? 'opacity-100' : 'opacity-40 pointer-events-none'
-            }`}
-          >
-            <div>
-              <label className="label" htmlFor="apprise-api-url">
-                Apprise API URL
-              </label>
-              <input
-                id="apprise-api-url"
-                type="url"
-                className="input font-mono text-[13px]"
-                value={draft.apprise_api_url}
-                onChange={(e) =>
-                  setDraft({ ...draft, apprise_api_url: e.target.value })
-                }
-                placeholder="http://apprise:8000"
-                autoComplete="off"
-                disabled={!isAdmin}
-                readOnly={!isAdmin}
-              />
-              <p className="hint">
-                Base URL of your Apprise API container (no trailing path). Example:{' '}
-                <span className="font-mono">http://apprise:8000</span>
-                {!isAdmin && (
-                  <>
-                    {' '}
-                    (admin-only — set via env{' '}
-                    <span className="font-mono">APPRISE_API_URL</span> or an admin.)
-                  </>
-                )}
-              </p>
-            </div>
-
-            <div>
-              <label className="label" htmlFor="apprise-config-key">
-                Config key (optional)
-              </label>
-              <input
-                id="apprise-config-key"
-                type="text"
-                className="input font-mono text-[13px] max-w-xs"
-                value={draft.apprise_config_key}
-                onChange={(e) =>
-                  setDraft({ ...draft, apprise_config_key: e.target.value })
-                }
-                placeholder="apprise"
-                autoComplete="off"
-              />
-              <p className="hint">
-                When set, notifications go to{' '}
-                <span className="font-mono">/notify/&#123;key&#125;</span> using URLs
-                stored in Apprise. Leave empty to use stateless mode with the URLs
-                below.
-              </p>
-            </div>
-
-            <div>
-              <label className="label" htmlFor="apprise-urls">
-                Apprise URLs (stateless)
-              </label>
-              <textarea
-                id="apprise-urls"
-                className="input font-mono text-[13px] min-h-[5.5rem] resize-y"
-                value={appriseUrlsText}
-                onChange={(e) => setAppriseUrlsText(e.target.value)}
-                placeholder={
-                  'discord://webhook_id/webhook_token\ntgram://bottoken/ChatID\nmailto://user:pass@smtp.example.com'
-                }
-                spellCheck={false}
-              />
-              <p className="hint">
-                One URL per line. Used when no config key is set. See{' '}
-                <a
-                  href="https://github.com/caronc/apprise/wiki"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-amber-400 hover:text-amber-300 underline underline-offset-2"
-                >
-                  Apprise wiki
-                </a>{' '}
-                for URL formats.
-              </p>
-            </div>
-
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <p className="text-sm font-medium text-ink-200">Use category tags</p>
-                <p className="hint !mt-1">
-                  Pass the alert category as an Apprise <span className="font-mono">tag</span>{' '}
-                  so destinations can be filtered (e.g. only critical events to PagerDuty).
-                  Tag names match the category ids below (
-                  <span className="font-mono">new_release</span>,{' '}
-                  <span className="font-mono">storage_low</span>, …).
-                </p>
-              </div>
-              <Toggle
-                checked={draft.apprise_use_tags}
-                onChange={(v) => setDraft({ ...draft, apprise_use_tags: v })}
-                label="Use Apprise tags"
-              />
-            </div>
-
-            <div>
-              <p className="label mb-2">Archive events</p>
-              <div className="rounded-lg border border-ink-800 bg-ink-950/40 divide-y divide-ink-800/80">
-                {ALERT_CATEGORY_ROWS.filter((r) => r.group === 'archive').map((row) => (
-                  <div
-                    key={row.key}
-                    className="flex items-start justify-between gap-4 px-4 py-3"
-                  >
-                    <div>
-                      <p className="text-sm font-medium text-ink-100">{row.label}</p>
-                      <p className="hint !mt-0.5">{row.description}</p>
-                      <p className="text-[11px] font-mono text-ink-600 mt-0.5">
-                        tag: {row.key.replace(/^alert_/, '')}
-                      </p>
-                    </div>
-                    <Toggle
-                      checked={Boolean(draft[row.key])}
-                      onChange={(v) => setDraft({ ...draft, [row.key]: v })}
-                      label={row.label}
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {isAdmin && (
-            <div>
-              <p className="label mb-2">System events</p>
-              <div className="rounded-lg border border-ink-800 bg-ink-950/40 divide-y divide-ink-800/80">
-                {ALERT_CATEGORY_ROWS.filter((r) => r.group === 'system').map((row) => (
-                  <div
-                    key={row.key}
-                    className="flex items-start justify-between gap-4 px-4 py-3"
-                  >
-                    <div>
-                      <p className="text-sm font-medium text-ink-100">{row.label}</p>
-                      <p className="hint !mt-0.5">{row.description}</p>
-                      <p className="text-[11px] font-mono text-ink-600 mt-0.5">
-                        tag: {row.key.replace(/^alert_/, '')}
-                      </p>
-                    </div>
-                    <Toggle
-                      checked={Boolean(draft[row.key])}
-                      onChange={(v) => setDraft({ ...draft, [row.key]: v })}
-                      label={row.label}
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
-            )}
-
-            {isAdmin && (
-            <div
-              className={`space-y-4 ${
-                draft.alert_storage_low ? '' : 'opacity-40 pointer-events-none'
-              }`}
-            >
-              <p className="label !mb-0">Storage thresholds</p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="label" htmlFor="storage-threshold">
-                    Usage threshold (%)
+                  <label className="label" htmlFor="global-max-asset">
+                    Global max asset size (MB)
                   </label>
                   <input
-                    id="storage-threshold"
-                    type="number"
-                    min={50}
-                    max={100}
-                    className="input max-w-[10rem]"
-                    value={draft.storage_alert_threshold_percent}
-                    onChange={(e) =>
-                      setDraft({
-                        ...draft,
-                        storage_alert_threshold_percent: Math.min(
-                          100,
-                          Math.max(50, parseInt(e.target.value || '90', 10))
-                        ),
-                      })
-                    }
-                  />
-                  <p className="hint">Alert when used space reaches this percent.</p>
-                </div>
-                <div>
-                  <label className="label" htmlFor="storage-min-free">
-                    Min free (MB)
-                  </label>
-                  <input
-                    id="storage-min-free"
+                    id="global-max-asset"
                     type="number"
                     min={0}
-                    step={128}
-                    className="input max-w-[10rem]"
-                    value={draft.storage_alert_min_free_mb}
+                    className="input max-w-[12rem]"
+                    value={draft.global_max_asset_size_mb}
                     onChange={(e) =>
                       setDraft({
                         ...draft,
-                        storage_alert_min_free_mb: Math.max(
+                        global_max_asset_size_mb: Math.max(
                           0,
                           parseInt(e.target.value || '0', 10)
                         ),
@@ -1447,157 +1395,373 @@ export default function SettingsClient({
                     }
                   />
                   <p className="hint">
-                    Also alert when free space drops below this (0 = ignore).
+                    Upper bound for all users&rsquo; per-user asset size limits.{' '}
+                    <span className="font-mono">0</span> = no global limit.
                   </p>
                 </div>
               </div>
+            </section>
 
-              {disk?.available && (
-                <div className="rounded-lg border border-ink-800 bg-ink-950/40 p-4">
-                  <p className="text-xs text-ink-500 mb-2 uppercase tracking-wide">
-                    Current disk ({disk.path})
+            {/* Memory awareness */}
+            <section className="surface p-5 sm:p-6">
+              <div className="flex items-start justify-between gap-4 mb-5">
+                <div>
+                  <h2 className="text-base font-semibold text-white">Memory limits</h2>
+                  <p className="hint !mt-1">
+                    Dynamically adjust job concurrency and defer heavy operations when system
+                    memory is low.
                   </p>
-                  <div className="grid grid-cols-3 gap-3 text-sm">
-                    <div>
-                      <span className="text-ink-500">Used</span>
-                      <br />
-                      <span className="font-mono tabular-nums">
-                        {disk.usedMB} MB ({Math.round(disk.usageRatio * 100)}%)
-                      </span>
+                </div>
+                <Toggle
+                  checked={draft.memory_aware_enabled}
+                  onChange={(v) => setDraft({ ...draft, memory_aware_enabled: v })}
+                  label="Enable memory-aware scheduling"
+                />
+              </div>
+
+              <div
+                className={`space-y-5 transition-opacity ${
+                  draft.memory_aware_enabled
+                    ? 'opacity-100'
+                    : 'opacity-40 pointer-events-none'
+                }`}
+              >
+                <div>
+                  <label className="label" htmlFor="min-free-memory">
+                    Minimum free memory (MB)
+                  </label>
+                  <input
+                    id="min-free-memory"
+                    type="number"
+                    min={64}
+                    max={65536}
+                    step={64}
+                    className="input max-w-[12rem]"
+                    value={draft.min_free_memory_mb}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        min_free_memory_mb: Math.max(
+                          64,
+                          parseInt(e.target.value || '256', 10)
+                        ),
+                      })
+                    }
+                  />
+                  <p className="hint">
+                    New jobs are deferred when free memory drops below this threshold.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="label" htmlFor="max-memory-ratio">
+                    Max memory usage ratio
+                  </label>
+                  <div className="flex items-center gap-3">
+                    <input
+                      id="max-memory-ratio"
+                      type="range"
+                      min={0.5}
+                      max={1}
+                      step={0.05}
+                      className="w-48"
+                      value={draft.max_memory_usage_ratio}
+                      onChange={(e) =>
+                        setDraft({
+                          ...draft,
+                          max_memory_usage_ratio: parseFloat(e.target.value),
+                        })
+                      }
+                    />
+                    <span className="font-mono text-sm text-ink-300 tabular-nums w-10">
+                      {Math.round(draft.max_memory_usage_ratio * 100)}%
+                    </span>
+                  </div>
+                  <p className="hint">
+                    Jobs are paused when total memory usage exceeds this fraction of
+                    available RAM (including cgroup limits in Docker).
+                  </p>
+                </div>
+
+                {scheduler?.memory_info && (
+                  <div className="rounded-lg border border-ink-800 bg-ink-950/40 p-4">
+                    <p className="text-xs text-ink-500 mb-2 uppercase tracking-wide">
+                      Current memory
+                    </p>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+                      <div>
+                        <span className="text-ink-500">Total</span>
+                        <br />
+                        <span className="font-mono tabular-nums">
+                          {scheduler.memory_info.totalMB} MB
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-ink-500">Free</span>
+                        <br />
+                        <span className="font-mono tabular-nums">
+                          {scheduler.memory_info.freeMB} MB
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-ink-500">Heap</span>
+                        <br />
+                        <span className="font-mono tabular-nums">
+                          {scheduler.memory_info.heapUsedMB} MB
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-ink-500">Effective concurrency</span>
+                        <br />
+                        <span className="font-mono tabular-nums">
+                          {scheduler.adjusted_concurrency ?? draft.concurrent_syncs}
+                        </span>
+                      </div>
                     </div>
-                    <div>
-                      <span className="text-ink-500">Free</span>
-                      <br />
-                      <span className="font-mono tabular-nums">{disk.freeMB} MB</span>
-                    </div>
-                    <div>
-                      <span className="text-ink-500">Total</span>
-                      <br />
-                      <span className="font-mono tabular-nums">{disk.totalMB} MB</span>
-                    </div>
+                    {scheduler.memory_info.cgroupLimited && (
+                      <p className="text-xs text-amber-400/70 mt-2">
+                        Running under a cgroup memory limit (Docker/container).
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            </section>
+
+            {/* Apprise API + system alerts */}
+            <section className="surface p-5 sm:p-6">
+              <h2 className="text-base font-semibold text-white mb-1">
+                Alerts — server configuration
+              </h2>
+              <p className="hint !mt-0 mb-5">
+                Apprise API base URL (SSRF-sensitive) and system-wide health alert thresholds.
+                Per-user notification destinations live on the Settings tab.
+              </p>
+
+              <div className="space-y-5">
+                <div>
+                  <label className="label" htmlFor="apprise-api-url">
+                    Apprise API URL
+                  </label>
+                  <input
+                    id="apprise-api-url"
+                    type="url"
+                    className="input font-mono text-[13px]"
+                    value={draft.apprise_api_url}
+                    onChange={(e) =>
+                      setDraft({ ...draft, apprise_api_url: e.target.value })
+                    }
+                    placeholder="http://apprise:8000"
+                    autoComplete="off"
+                  />
+                  <p className="hint">
+                    Base URL of your Apprise API container (no trailing path). Example:{' '}
+                    <span className="font-mono">http://apprise:8000</span>. Can also be set
+                    via env <span className="font-mono">APPRISE_API_URL</span>.
+                  </p>
+                </div>
+
+                <div>
+                  <p className="label mb-2">System events</p>
+                  <div className="rounded-lg border border-ink-800 bg-ink-950/40 divide-y divide-ink-800/80">
+                    {ALERT_CATEGORY_ROWS.filter((r) => r.group === 'system').map((row) => (
+                      <div
+                        key={row.key}
+                        className="flex items-start justify-between gap-4 px-4 py-3"
+                      >
+                        <div>
+                          <p className="text-sm font-medium text-ink-100">{row.label}</p>
+                          <p className="hint !mt-0.5">{row.description}</p>
+                          <p className="text-[11px] font-mono text-ink-600 mt-0.5">
+                            tag: {row.key.replace(/^alert_/, '')}
+                          </p>
+                        </div>
+                        <Toggle
+                          checked={Boolean(draft[row.key])}
+                          onChange={(v) => setDraft({ ...draft, [row.key]: v })}
+                          label={row.label}
+                        />
+                      </div>
+                    ))}
                   </div>
                 </div>
-              )}
-            </div>
-            )}
 
-            <div className="flex flex-wrap items-center gap-3 pt-1">
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={sendTestAlert}
-                disabled={testBusy || !draft.alerts_enabled}
-              >
-                {testBusy ? (
-                  <>
-                    <Spinner /> Sending test…
-                  </>
-                ) : (
-                  'Send test notification'
-                )}
-              </button>
-              <span className="text-xs text-ink-500">
-                {alertsConfigured ||
-                (draft.apprise_api_url.trim() &&
-                  (draft.apprise_config_key.trim() ||
-                    appriseUrlsText.trim())) ? (
-                  <span className="text-mint-400">Apprise looks configured</span>
-                ) : (
-                  'Save API URL + config key or URLs, then test'
-                )}
-              </span>
-            </div>
-          </div>
-        </section>
+                <div
+                  className={`space-y-4 ${
+                    draft.alert_storage_low ? '' : 'opacity-40 pointer-events-none'
+                  }`}
+                >
+                  <p className="label !mb-0">Storage thresholds</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="label" htmlFor="storage-threshold">
+                        Usage threshold (%)
+                      </label>
+                      <input
+                        id="storage-threshold"
+                        type="number"
+                        min={50}
+                        max={100}
+                        className="input max-w-[10rem]"
+                        value={draft.storage_alert_threshold_percent}
+                        onChange={(e) =>
+                          setDraft({
+                            ...draft,
+                            storage_alert_threshold_percent: Math.min(
+                              100,
+                              Math.max(50, parseInt(e.target.value || '90', 10))
+                            ),
+                          })
+                        }
+                      />
+                      <p className="hint">Alert when used space reaches this percent.</p>
+                    </div>
+                    <div>
+                      <label className="label" htmlFor="storage-min-free">
+                        Min free (MB)
+                      </label>
+                      <input
+                        id="storage-min-free"
+                        type="number"
+                        min={0}
+                        step={128}
+                        className="input max-w-[10rem]"
+                        value={draft.storage_alert_min_free_mb}
+                        onChange={(e) =>
+                          setDraft({
+                            ...draft,
+                            storage_alert_min_free_mb: Math.max(
+                              0,
+                              parseInt(e.target.value || '0', 10)
+                            ),
+                          })
+                        }
+                      />
+                      <p className="hint">
+                        Also alert when free space drops below this (0 = ignore).
+                      </p>
+                    </div>
+                  </div>
 
-        {/* Scheduler status */}
-        <section className="surface p-5 sm:p-6">
-          <h2 className="text-base font-semibold text-white mb-4">Scheduler status</h2>
-          <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-            <StatusRow
-              label="Process"
-              value={
-                scheduler?.started ? (
-                  <span className="text-mint-400">running</span>
-                ) : (
-                  <span className="text-ink-500">not started</span>
-                )
-              }
-            />
-            <StatusRow
-              label="Current job"
-              value={
-                scheduler?.running ? (
-                  <span className="text-amber-300">syncing…</span>
-                ) : (
-                  <span className="text-ink-400">idle</span>
-                )
-              }
-            />
-            <StatusRow
-              label="Last run"
-              value={
-                scheduler?.last_run_at ? (
-                  <span className="font-mono text-xs">
-                    {formatDate(scheduler.last_run_at)}
-                  </span>
-                ) : (
-                  <span className="text-ink-500">never</span>
-                )
-              }
-            />
-            <StatusRow
-              label="Last result"
-              value={
-                <span className="text-ink-400 text-xs">
-                  {scheduler?.last_run_summary || '—'}
-                </span>
-              }
-            />
-            <StatusRow
-              label="Last GitHub scan"
-              value={
-                scheduler?.last_github_scan_at ? (
-                  <span className="font-mono text-xs">
-                    {formatDate(scheduler.last_github_scan_at)}
-                  </span>
-                ) : (
-                  <span className="text-ink-500">never</span>
-                )
-              }
-            />
-            <StatusRow
-              label="GitHub scan result"
-              value={
-                <span className="text-ink-400 text-xs">
-                  {scheduler?.last_github_scan_summary || '—'}
-                </span>
-              }
-            />
-          </dl>
+                  {disk?.available && (
+                    <div className="rounded-lg border border-ink-800 bg-ink-950/40 p-4">
+                      <p className="text-xs text-ink-500 mb-2 uppercase tracking-wide">
+                        Current disk ({disk.path})
+                      </p>
+                      <div className="grid grid-cols-3 gap-3 text-sm">
+                        <div>
+                          <span className="text-ink-500">Used</span>
+                          <br />
+                          <span className="font-mono tabular-nums">
+                            {disk.usedMB} MB ({Math.round(disk.usageRatio * 100)}%)
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-ink-500">Free</span>
+                          <br />
+                          <span className="font-mono tabular-nums">{disk.freeMB} MB</span>
+                        </div>
+                        <div>
+                          <span className="text-ink-500">Total</span>
+                          <br />
+                          <span className="font-mono tabular-nums">{disk.totalMB} MB</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </section>
 
-          <div className="mt-5 pt-5 border-t border-ink-800">
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={runAllNow}
-              disabled={runningAll || scheduler?.running}
-            >
-              {runningAll || scheduler?.running ? (
-                <>
-                  <Spinner /> Syncing all repos…
-                </>
+            {/* Registered users */}
+            <section className="surface p-5 sm:p-6">
+              <div className="flex items-start justify-between gap-4 mb-1">
+                <div>
+                  <h2 className="text-base font-semibold text-white">Users</h2>
+                  <p className="hint !mt-1">
+                    Registered accounts and storage attributed to their archive memberships.
+                    Shared public mirrors are split evenly among members.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn-ghost !py-1.5 !px-3 text-xs shrink-0"
+                  onClick={refreshUsers}
+                >
+                  Refresh
+                </button>
+              </div>
+
+              {!users || users.length === 0 ? (
+                <p className="text-sm text-ink-500 mt-4">No users found.</p>
               ) : (
-                'Sync all repositories now'
+                <div className="mt-4 overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-[11px] uppercase tracking-wide text-ink-500 border-b border-ink-800">
+                        <th className="pb-2 pr-3 font-medium">User</th>
+                        <th className="pb-2 pr-3 font-medium">Repos</th>
+                        <th className="pb-2 pr-3 font-medium text-right">Storage</th>
+                        <th className="pb-2 font-medium text-right">Last login</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-ink-800/80">
+                      {users.map((u) => (
+                        <tr key={u.id} className="align-top">
+                          <td className="py-3 pr-3">
+                            <div className="font-medium text-ink-100">
+                              {u.username}
+                              {!u.registered && (
+                                <span className="ml-2 text-[10px] uppercase tracking-wide text-ink-600">
+                                  data only
+                                </span>
+                              )}
+                            </div>
+                            {(u.name || u.email) && (
+                              <div className="text-xs text-ink-500 mt-0.5">
+                                {[u.name, u.email].filter(Boolean).join(' · ')}
+                              </div>
+                            )}
+                            <div className="text-[10px] font-mono text-ink-600 mt-0.5 break-all">
+                              {u.id}
+                            </div>
+                          </td>
+                          <td className="py-3 pr-3 text-ink-300 whitespace-nowrap">
+                            <span className="font-mono tabular-nums">{u.repo_count}</span>
+                            {u.private_repo_count > 0 && (
+                              <span className="text-ink-500 text-xs ml-1">
+                                ({u.private_repo_count} private)
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3 pr-3 text-right font-mono tabular-nums text-ink-200 whitespace-nowrap">
+                            {formatBytes(u.storage_bytes)}
+                          </td>
+                          <td className="py-3 text-right text-xs text-ink-500 whitespace-nowrap">
+                            {u.last_login_at ? formatDate(u.last_login_at) : '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr className="border-t border-ink-800 text-xs text-ink-500">
+                        <td className="pt-3 pr-3" colSpan={2}>
+                          {users.length} user{users.length === 1 ? '' : 's'}
+                        </td>
+                        <td className="pt-3 pr-3 text-right font-mono tabular-nums text-ink-300">
+                          {formatBytes(totalUserStorage)}
+                        </td>
+                        <td className="pt-3" />
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
               )}
-            </button>
-            <p className="hint">
-              Forces a full pass over every archived repository, ignoring the interval.
-            </p>
-          </div>
-        </section>
+            </section>
+          </>
+        )}
 
-        {/* Save bar */}
+        {/* Save bar — shared across tabs */}
         <div className="flex items-center justify-between gap-3 sticky bottom-4 surface px-4 py-3">
           <p className="text-xs text-ink-500">
             {dirty ? 'You have unsaved changes' : 'All changes saved'}
