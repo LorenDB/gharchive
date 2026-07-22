@@ -1040,7 +1040,16 @@ function save() {
   // 2. Atomic replace on the same filesystem (POSIX rename is atomic)
   fs.renameSync(tmpPath, dbPath);
 
-  // 3. Snapshot the new good primary as .bak (best-effort)
+  // 3. Fsync the directory so the rename is durable (otherwise a crash can
+  //    lose the directory entry, leaving only the .tmp)
+  const dirFd = fs.openSync(dir, 'r');
+  try {
+    fs.fsyncSync(dirFd);
+  } finally {
+    fs.closeSync(dirFd);
+  }
+
+  // 4. Snapshot the new good primary as .bak (best-effort)
   try {
     fs.copyFileSync(dbPath, bakPath);
   } catch (err: unknown) {
