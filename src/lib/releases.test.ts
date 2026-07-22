@@ -10,6 +10,7 @@ describe('parseCloneUrl', () => {
       expect(result.owner).toBe('owner');
       expect(result.repo).toBe('repo');
       expect(result.projectPath).toBe('owner/repo');
+      expect(result.hostname).toBe('github.com');
     });
 
     it('parses URL without .git suffix', () => {
@@ -47,6 +48,72 @@ describe('parseCloneUrl', () => {
       expect(result.owner).toBe('group');
       expect(result.repo).toBe('project');
     });
+
+    it('parses nested group paths', () => {
+      const result = parseCloneUrl(
+        'https://gitlab.com/group/sub/project.git'
+      );
+      expect(result.platform).toBe('gitlab');
+      expect(result.owner).toBe('group');
+      expect(result.repo).toBe('project');
+      expect(result.projectPath).toBe('group/sub/project');
+    });
+  });
+
+  describe('Codeberg HTTPS', () => {
+    it('parses a Codeberg repo URL as platform codeberg', () => {
+      const result = parseCloneUrl(
+        'https://codeberg.org/forgejo/forgejo.git'
+      );
+      expect(result.platform).toBe('codeberg');
+      expect(result.owner).toBe('forgejo');
+      expect(result.repo).toBe('forgejo');
+      expect(result.hostname).toBe('codeberg.org');
+    });
+
+    it('parses Codeberg SSH', () => {
+      const result = parseCloneUrl('git@codeberg.org:owner/repo.git');
+      expect(result.platform).toBe('codeberg');
+      expect(result.owner).toBe('owner');
+      expect(result.repo).toBe('repo');
+    });
+  });
+
+  describe('Arbitrary hosts', () => {
+    it('accepts bitbucket.org using hostname as platform', () => {
+      const result = parseCloneUrl(
+        'https://bitbucket.org/owner/repo.git'
+      );
+      expect(result.platform).toBe('bitbucket.org');
+      expect(result.owner).toBe('owner');
+      expect(result.repo).toBe('repo');
+      expect(result.hostname).toBe('bitbucket.org');
+    });
+
+    it('accepts self-hosted forge hostnames', () => {
+      const result = parseCloneUrl(
+        'https://git.example.com/org/my-repo.git'
+      );
+      expect(result.platform).toBe('git.example.com');
+      expect(result.owner).toBe('org');
+      expect(result.repo).toBe('my-repo');
+    });
+
+    it('accepts SSH for arbitrary hosts', () => {
+      const result = parseCloneUrl('git@git.example.com:org/repo.git');
+      expect(result.platform).toBe('git.example.com');
+      expect(result.owner).toBe('org');
+      expect(result.repo).toBe('repo');
+    });
+
+    it('preserves custom ports on https URLs', () => {
+      const result = parseCloneUrl(
+        'https://git.example.com:3000/org/repo.git'
+      );
+      expect(result.platform).toBe('git.example.com');
+      expect(result.port).toBe('3000');
+      expect(result.hostname).toBe('git.example.com');
+    });
   });
 
   describe('GitHub SSH', () => {
@@ -76,18 +143,6 @@ describe('parseCloneUrl', () => {
   });
 
   describe('error cases', () => {
-    it('throws for unsupported hosts', () => {
-      expect(() => parseCloneUrl('https://bitbucket.org/owner/repo.git')).toThrow(
-        'Unsupported repository URL'
-      );
-    });
-
-    it('throws for non-github/gitlab SSH', () => {
-      expect(() => parseCloneUrl('git@git.example.com:org/repo.git')).toThrow(
-        'Unsupported repository URL'
-      );
-    });
-
     it('throws for invalid URL format', () => {
       expect(() => parseCloneUrl('not-a-url')).toThrow(
         'Unsupported repository URL'
@@ -104,6 +159,18 @@ describe('parseCloneUrl', () => {
       expect(() => parseCloneUrl('https://gitlab.com//repo.git')).toThrow(
         'Invalid repo URL'
       );
+    });
+
+    it('throws for single-segment path', () => {
+      expect(() => parseCloneUrl('https://git.example.com/onlyrepo')).toThrow(
+        'Invalid repo URL'
+      );
+    });
+
+    it('throws for github nested paths', () => {
+      expect(() =>
+        parseCloneUrl('https://github.com/a/b/c.git')
+      ).toThrow('Invalid repo URL');
     });
   });
 });
@@ -139,5 +206,16 @@ describe('getReleaseAssetPath', () => {
     // Back-compat: when a string is passed, it's treated as { userId: string }
     // isPrivate is false since the string doesn't have isPrivate=true
     expect(result).toContain('github');
+  });
+
+  it('supports codeberg platform segment', () => {
+    const result = getReleaseAssetPath(
+      'codeberg',
+      'forgejo',
+      'forgejo',
+      'v1',
+      'bin'
+    );
+    expect(result).toContain(path.join('releases', 'codeberg', 'forgejo'));
   });
 });

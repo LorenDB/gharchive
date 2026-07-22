@@ -41,4 +41,29 @@ describe('resolveImportPlatform', () => {
   it('defaults to github when nothing is known', () => {
     expect(resolveImportPlatform({ clone_url: '' })).toBe('github');
   });
+
+  it('infers codeberg from clone URL', () => {
+    expect(
+      resolveImportPlatform({
+        clone_url: 'https://codeberg.org/forgejo/forgejo.git',
+      })
+    ).toBe('codeberg');
+  });
+
+  it('infers arbitrary host platforms from clone URL', () => {
+    expect(
+      resolveImportPlatform({
+        clone_url: 'https://git.example.com/org/repo.git',
+      })
+    ).toBe('git.example.com');
+  });
+
+  it('honors explicit arbitrary platform', () => {
+    expect(
+      resolveImportPlatform({
+        platform: 'codeberg',
+        clone_url: 'https://codeberg.org/o/r.git',
+      })
+    ).toBe('codeberg');
+  });
 });

@@ -28,6 +28,7 @@ export interface RepoLike {
   owner: string;
   name: string;
   mirror_path: string;
+  clone_url?: string;
   is_private?: boolean;
 }
 
@@ -149,47 +150,45 @@ export async function syncRepo(
     messages.push('git: initial clone');
   }
 
-  // Scrape remote description / topics / stars / archived (best-effort)
+  // Scrape remote description / topics / stars / archived (best-effort).
+  // Known platforms (GitHub/GitLab/Codeberg) always try; arbitrary hosts probe
+  // for a Forgejo/Gitea API and skip gracefully when none is found.
   try {
-    if (repo.platform === 'github' || repo.platform === 'gitlab') {
-      const prior = getDb().repos.find((r) => r.id === repo.id);
-      const wasArchived = Boolean(prior?.is_archived);
-      const hadRemoteMeta = Boolean(prior?.remote_meta_synced_at);
+    const prior = getDb().repos.find((r) => r.id === repo.id);
+    const wasArchived = Boolean(prior?.is_archived);
+    const hadRemoteMeta = Boolean(prior?.remote_meta_synced_at);
 
-      const meta = await fetchRemoteRepoMeta(
-        repo.platform,
-        repo.owner,
-        repo.name
+    const meta = await fetchRemoteRepoMeta(repo.platform, repo.owner, repo.name, {
+      cloneUrl: repo.clone_url,
+    });
+    if (meta) {
+      updateRepo(repo.id, {
+        ...meta,
+        remote_meta_synced_at: new Date().toISOString(),
+      });
+      messages.push(
+        meta.is_archived
+          ? 'meta: refreshed (upstream archived)'
+          : 'meta: remote description/topics refreshed'
       );
-      if (meta) {
-        updateRepo(repo.id, {
-          ...meta,
-          remote_meta_synced_at: new Date().toISOString(),
-        });
-        messages.push(
-          meta.is_archived
-            ? 'meta: refreshed (upstream archived)'
-            : 'meta: remote description/topics refreshed'
-        );
 
-        if (meta.is_archived && !wasArchived && hadRemoteMeta) {
-          messages.push('remote: repository marked archived upstream');
-          await sendAlert({
-            category: 'repo_archived',
-            title: `Repo archived: ${label}`,
-            body: [
-              `**${label}** was marked as **archived** on the remote.`,
-              '',
-              'The local bare mirror and release archive are still kept.',
-              'No new commits or releases are expected from upstream.',
-            ].join('\n'),
-            subject: `archive:${archiveId}:archived`,
-            severity: 'warning',
-          });
-        }
-      } else {
-        messages.push('meta: unavailable');
+      if (meta.is_archived && !wasArchived && hadRemoteMeta) {
+        messages.push('remote: repository marked archived upstream');
+        await sendAlert({
+          category: 'repo_archived',
+          title: `Repo archived: ${label}`,
+          body: [
+            `**${label}** was marked as **archived** on the remote.`,
+            '',
+            'The local bare mirror and release archive are still kept.',
+            'No new commits or releases are expected from upstream.',
+          ].join('\n'),
+          subject: `archive:${archiveId}:archived`,
+          severity: 'warning',
+        });
       }
+    } else {
+      messages.push('meta: unavailable');
     }
   } catch (err: any) {
     messages.push(`meta: failed - ${err?.message || err}`);
@@ -198,140 +197,158 @@ export async function syncRepo(
   const priorReleaseCount = countArchiveReleases(archiveId);
   const newReleaseTags: string[] = [];
 
+  // Trust the repo's own host for release-asset downloads (Forgejo keeps assets
+  // on the same origin; GitHub/GitLab CDN hosts are already in the allowlist).
+  const assetExtraHosts: string[] = [];
+  try {
+    if (repo.clone_url) {
+      const { hostInfoFromCloneUrl } = await import('@/lib/forgejo');
+      const hi = hostInfoFromCloneUrl(repo.clone_url);
+      if (hi?.hostname) assetExtraHosts.push(hi.hostname);
+    }
+  } catch {
+    // ignore
+  }
+
   try {
     const projectPath = `${repo.owner}/${repo.name}`;
-    const releases = await fetchReleases(
-      repo.platform as 'github' | 'gitlab',
-      projectPath
-    );
+    const releases = await fetchReleases(repo.platform, projectPath, {
+      cloneUrl: repo.clone_url,
+    });
 
-    if (priorReleaseCount > 0 && releases.length === 0) {
-      messages.push(
-        `releases: wiped upstream (had ${priorReleaseCount} archived, remote has 0)`
-      );
-      await sendAlert({
-        category: 'releases_wiped',
-        title: `Releases wiped: ${label}`,
-        body: [
-          `**${label}** no longer has any releases on the remote.`,
-          `Local archive still has **${priorReleaseCount}** release(s) (metadata/assets preserved).`,
-        ].join('\n'),
-        subject: `archive:${archiveId}`,
-        severity: 'failure',
-      });
-    }
-
-    let newReleases = 0;
-    let newAssets = 0;
-    let skippedAssets = 0;
-    const maxBytes =
-      settings.max_asset_size_mb > 0
-        ? settings.max_asset_size_mb * 1024 * 1024
-        : Infinity;
-
-    options.onProgress?.(`Fetching ${releases.length} releases...`);
-
-    let releaseIdx = 0;
-    for (const rel of releases) {
-      releaseIdx++;
-      options.onProgress?.(
-        `Downloading release ${releaseIdx}/${releases.length}`
-      );
-
-      if (!dbTagExists(archiveId, rel.tag_name)) {
-        addRelease({
-          archive_id: archiveId,
-          tag_name: rel.tag_name,
-          name: rel.name,
-          body: rel.body,
-          published_at: rel.published_at,
+    // null = no remote releases API (arbitrary plain-git host) — skip cleanly
+    if (releases === null) {
+      messages.push('releases: skipped (no remote API for this host)');
+    } else {
+      if (priorReleaseCount > 0 && releases.length === 0) {
+        messages.push(
+          `releases: wiped upstream (had ${priorReleaseCount} archived, remote has 0)`
+        );
+        await sendAlert({
+          category: 'releases_wiped',
+          title: `Releases wiped: ${label}`,
+          body: [
+            `**${label}** no longer has any releases on the remote.`,
+            `Local archive still has **${priorReleaseCount}** release(s) (metadata/assets preserved).`,
+          ].join('\n'),
+          subject: `archive:${archiveId}`,
+          severity: 'failure',
         });
-        newReleases++;
-        newReleaseTags.push(rel.tag_name);
       }
 
-      const releaseRow = getReleaseByTag(archiveId, rel.tag_name);
-      if (!releaseRow) continue;
+      let newReleases = 0;
+      let newAssets = 0;
+      let skippedAssets = 0;
+      const maxBytes =
+        settings.max_asset_size_mb > 0
+          ? settings.max_asset_size_mb * 1024 * 1024
+          : Infinity;
 
-      for (const asset of rel.assets) {
-        if (assetExists(releaseRow.id, asset.name)) continue;
+      options.onProgress?.(`Fetching ${releases.length} releases...`);
 
-        const assetPath = getReleaseAssetPath(
-          repo.platform,
-          repo.owner,
-          repo.name,
-          rel.tag_name,
-          asset.name,
-          { isPrivate }
+      let releaseIdx = 0;
+      for (const rel of releases) {
+        releaseIdx++;
+        options.onProgress?.(
+          `Downloading release ${releaseIdx}/${releases.length}`
         );
 
-        let downloaded = false;
-        const tooLarge = asset.size > 0 && asset.size > maxBytes;
-
-        if (!settings.download_release_assets) {
-          skippedAssets++;
-        } else if (tooLarge) {
-          skippedAssets++;
-        } else if (asset.download_url) {
-          if (asset.size > 10 * 1024 * 1024) {
-            const assetMemCheck = hasEnoughMemory(
-              Math.ceil(asset.size / 1024 / 1024) + settings.min_free_memory_mb
-            );
-            if (!assetMemCheck.ok) {
-              skippedAssets++;
-              continue;
-            }
-          }
-          // If file already exists (shared path from another user's sync), link it
-          if (fs.existsSync(assetPath)) {
-            downloaded = true;
-          } else {
-            downloaded = await downloadReleaseAsset(
-              asset.download_url,
-              assetPath
-            );
-          }
+        if (!dbTagExists(archiveId, rel.tag_name)) {
+          addRelease({
+            archive_id: archiveId,
+            tag_name: rel.tag_name,
+            name: rel.name,
+            body: rel.body,
+            published_at: rel.published_at,
+          });
+          newReleases++;
+          newReleaseTags.push(rel.tag_name);
         }
 
-        addReleaseAsset({
-          release_id: releaseRow.id,
-          name: asset.name,
-          content_type: asset.content_type,
-          size: asset.size || null,
-          file_path: downloaded ? assetPath : null,
-          download_url: asset.download_url || null,
-        });
-        if (downloaded) newAssets++;
+        const releaseRow = getReleaseByTag(archiveId, rel.tag_name);
+        if (!releaseRow) continue;
+
+        for (const asset of rel.assets) {
+          if (assetExists(releaseRow.id, asset.name)) continue;
+
+          const assetPath = getReleaseAssetPath(
+            repo.platform,
+            repo.owner,
+            repo.name,
+            rel.tag_name,
+            asset.name,
+            { isPrivate }
+          );
+
+          let downloaded = false;
+          const tooLarge = asset.size > 0 && asset.size > maxBytes;
+
+          if (!settings.download_release_assets) {
+            skippedAssets++;
+          } else if (tooLarge) {
+            skippedAssets++;
+          } else if (asset.download_url) {
+            if (asset.size > 10 * 1024 * 1024) {
+              const assetMemCheck = hasEnoughMemory(
+                Math.ceil(asset.size / 1024 / 1024) + settings.min_free_memory_mb
+              );
+              if (!assetMemCheck.ok) {
+                skippedAssets++;
+                continue;
+              }
+            }
+            // If file already exists (shared path from another user's sync), link it
+            if (fs.existsSync(assetPath)) {
+              downloaded = true;
+            } else {
+              downloaded = await downloadReleaseAsset(
+                asset.download_url,
+                assetPath,
+                { extraTrustedHosts: assetExtraHosts }
+              );
+            }
+          }
+
+          addReleaseAsset({
+            release_id: releaseRow.id,
+            name: asset.name,
+            content_type: asset.content_type,
+            size: asset.size || null,
+            file_path: downloaded ? assetPath : null,
+            download_url: asset.download_url || null,
+          });
+          if (downloaded) newAssets++;
+        }
       }
-    }
 
-    let releaseMsg = `releases: ${releases.length} fetched (${newReleases} new, ${newAssets} assets)`;
-    if (skippedAssets > 0) releaseMsg += `, ${skippedAssets} skipped`;
-    messages.push(releaseMsg);
+      let releaseMsg = `releases: ${releases.length} fetched (${newReleases} new, ${newAssets} assets)`;
+      if (skippedAssets > 0) releaseMsg += `, ${skippedAssets} skipped`;
+      messages.push(releaseMsg);
 
-    if (newReleaseTags.length > 0) {
-      const tagList = newReleaseTags
-        .slice(0, 20)
-        .map((t) => `- \`${t}\``)
-        .join('\n');
-      const more =
-        newReleaseTags.length > 20
-          ? `\n…and ${newReleaseTags.length - 20} more`
-          : '';
-      await sendAlert({
-        category: 'new_release',
-        title:
-          newReleaseTags.length === 1
-            ? `New release: ${label} ${newReleaseTags[0]}`
-            : `New releases: ${label} (${newReleaseTags.length})`,
-        body: [
-          `**${label}** has ${newReleaseTags.length} new release(s):`,
-          '',
-          tagList + more,
-        ].join('\n'),
-        subject: `archive:${archiveId}:${newReleaseTags.join(',')}`,
-        severity: 'info',
-      });
+      if (newReleaseTags.length > 0) {
+        const tagList = newReleaseTags
+          .slice(0, 20)
+          .map((t) => `- \`${t}\``)
+          .join('\n');
+        const more =
+          newReleaseTags.length > 20
+            ? `\n…and ${newReleaseTags.length - 20} more`
+            : '';
+        await sendAlert({
+          category: 'new_release',
+          title:
+            newReleaseTags.length === 1
+              ? `New release: ${label} ${newReleaseTags[0]}`
+              : `New releases: ${label} (${newReleaseTags.length})`,
+          body: [
+            `**${label}** has ${newReleaseTags.length} new release(s):`,
+            '',
+            tagList + more,
+          ].join('\n'),
+          subject: `archive:${archiveId}:${newReleaseTags.join(',')}`,
+          severity: 'info',
+        });
+      }
     }
   } catch (err: any) {
     const errMsg = err?.message || String(err);
@@ -340,7 +357,8 @@ export async function syncRepo(
     if (
       isRemoteMissingError(errMsg) ||
       /GitHub API error: 404/i.test(errMsg) ||
-      /GitLab API error: 404/i.test(errMsg)
+      /GitLab API error: 404/i.test(errMsg) ||
+      /Forgejo API error: 404/i.test(errMsg)
     ) {
       await sendAlert({
         category: 'repo_deleted',

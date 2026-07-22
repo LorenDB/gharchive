@@ -24,6 +24,7 @@ import {
   type GhOwnedRepo,
 } from '@/lib/github';
 import { parseCloneUrl } from '@/lib/releases';
+import { defaultCloneUrl } from '@/lib/platform';
 import {
   getRequiredUserId,
   runAsUserAsync,
@@ -35,7 +36,8 @@ export interface ImportItem {
   owner: string;
   name: string;
   clone_url: string;
-  platform?: 'github' | 'gitlab';
+  /** Platform id: github | gitlab | codeberg | hostname for arbitrary hosts */
+  platform?: string;
   /** GitHub list GraphQL ids to assign (may be empty = unlisted / no list) */
   github_list_ids: string[];
   /** Local list names to ensure/create and assign (optional) */
@@ -51,8 +53,8 @@ export interface ImportItem {
 /** Resolve platform from explicit field or clone URL (never assume GitHub). */
 export function resolveImportPlatform(
   item: Pick<ImportItem, 'platform' | 'clone_url'>
-): 'github' | 'gitlab' {
-  if (item.platform === 'github' || item.platform === 'gitlab') {
+): string {
+  if (item.platform && typeof item.platform === 'string') {
     return item.platform;
   }
   if (item.clone_url) {
@@ -65,15 +67,6 @@ export function resolveImportPlatform(
   return 'github';
 }
 
-function defaultCloneUrl(
-  platform: 'github' | 'gitlab',
-  owner: string,
-  name: string
-): string {
-  const host = platform === 'gitlab' ? 'gitlab.com' : 'github.com';
-  return `https://${host}/${owner}/${name}.git`;
-}
-
 export const PENDING_PHASES = ['queued', 'cloning', 'releases'] as const;
 export type PendingPhase = (typeof PENDING_PHASES)[number];
 
@@ -81,7 +74,7 @@ export interface PendingItem {
   owner: string;
   name: string;
   clone_url: string;
-  platform: 'github' | 'gitlab';
+  platform: string;
   phase: PendingPhase;
   detail: string | null;
   userId: string;

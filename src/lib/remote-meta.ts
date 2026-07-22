@@ -1,7 +1,14 @@
 /**
  * Fetch repository metadata (description, topics, language, etc.)
- * from GitHub or GitLab APIs for display on the repo detail page.
+ * from GitHub, GitLab, or Forgejo/Gitea APIs for display on the repo detail page.
  */
+
+import { knownApiKind } from '@/lib/platform';
+import {
+  fetchForgejoRepoMeta,
+  hostInfoFromCloneUrl,
+  resolveForgejoHost,
+} from '@/lib/forgejo';
 
 export interface RemoteRepoMeta {
   remote_description: string | null;
@@ -17,16 +24,55 @@ export interface RemoteRepoMeta {
   remote_updated_at: string | null;
 }
 
+export type FetchRemoteMetaOptions = {
+  /** Clone URL used to resolve host/port for Forgejo detection & API base. */
+  cloneUrl?: string | null;
+};
+
 export async function fetchRemoteRepoMeta(
-  platform: 'github' | 'gitlab',
+  platform: string,
   owner: string,
-  name: string
+  name: string,
+  options: FetchRemoteMetaOptions = {}
 ): Promise<RemoteRepoMeta | null> {
   try {
-    if (platform === 'github') {
+    const kind = knownApiKind(platform);
+    if (kind === 'github') {
       return await fetchGithubMeta(owner, name);
     }
-    return await fetchGitlabMeta(owner, name);
+    if (kind === 'gitlab') {
+      return await fetchGitlabMeta(owner, name);
+    }
+    if (kind === 'forgejo') {
+      const host =
+        hostInfoFromCloneUrl(options.cloneUrl) ?? {
+          hostname: platform === 'codeberg' ? 'codeberg.org' : platform,
+          port: null,
+        };
+      return await fetchForgejoRepoMeta(
+        host.hostname,
+        owner,
+        name,
+        host.port
+      );
+    }
+
+    // Arbitrary host: probe for Forgejo/Gitea API
+    const host = hostInfoFromCloneUrl(options.cloneUrl) ?? {
+      hostname: platform,
+      port: null,
+    };
+    if (!host.hostname) return null;
+
+    const isForgejo = await resolveForgejoHost(host.hostname, host.port);
+    if (!isForgejo) return null;
+
+    return await fetchForgejoRepoMeta(
+      host.hostname,
+      owner,
+      name,
+      host.port
+    );
   } catch (err: any) {
     console.warn(
       `[remote-meta] ${platform}:${owner}/${name}:`,

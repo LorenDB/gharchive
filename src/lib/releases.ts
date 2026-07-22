@@ -8,6 +8,12 @@ import {
 import { hasEnoughMemory } from '@/lib/memory';
 import { assertSafePathSegment } from '@/lib/git';
 import { parseTrustedAssetUrl } from '@/lib/safe-url';
+import { knownApiKind, platformFromHost } from '@/lib/platform';
+import {
+  fetchForgejoReleases,
+  hostInfoFromCloneUrl,
+  resolveForgejoHost,
+} from '@/lib/forgejo';
 
 function getReleasesDir(): string {
   const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
@@ -29,30 +35,41 @@ export interface AssetData {
   download_url: string;
 }
 
-function finalizeCloneIdentity(
-  platform: 'github' | 'gitlab',
-  repoPath: string
-): {
-  platform: 'github' | 'gitlab';
+export interface CloneIdentity {
+  /** On-disk / dedup platform id (github, gitlab, codeberg, or hostname). */
+  platform: string;
   owner: string;
   repo: string;
   projectPath: string;
-} {
+  /** Original hostname (no www.), for API base resolution. */
+  hostname: string;
+  /** Port if present in the URL (https custom ports). */
+  port: string | null;
+}
+
+function finalizeCloneIdentity(
+  platform: string,
+  hostname: string,
+  repoPath: string,
+  options: { strictTwoSegment?: boolean; port?: string | null } = {}
+): CloneIdentity {
   const parts = repoPath
     .split('/')
     .filter(Boolean)
     .map((p) => p.replace(/\.git$/, ''));
   if (parts.length < 2) throw new Error('Invalid repo URL');
-  // GitHub is always owner/name (optionally with extra noise we reject)
-  if (platform === 'github' && parts.length !== 2) {
+  // GitHub / Codeberg / typical Forgejo: owner/name only
+  if (options.strictTwoSegment && parts.length !== 2) {
     throw new Error('Invalid repo URL');
   }
-  // GitLab may have nested groups — first segment owner, last segment name for
-  // on-disk layout; projectPath keeps the full path for API calls.
+  // GitLab (and unknown hosts) may have nested groups — first segment owner,
+  // last segment name for on-disk layout; projectPath keeps the full path.
   const ownerSeg = parts[0]!;
   const nameSeg = parts[parts.length - 1]!;
   assertSafePathSegment(ownerSeg, 'owner');
   assertSafePathSegment(nameSeg, 'repo');
+  // Platform may be a hostname (dots OK); still validate as path segment
+  assertSafePathSegment(platform, 'platform');
   for (const p of parts) {
     if (p === '.' || p === '..' || !p) {
       throw new Error('Invalid repo URL');
@@ -63,15 +80,17 @@ function finalizeCloneIdentity(
     owner: ownerSeg,
     repo: nameSeg,
     projectPath: parts.join('/'),
+    hostname,
+    port: options.port ?? null,
   };
 }
 
-export function parseCloneUrl(url: string): {
-  platform: 'github' | 'gitlab';
-  owner: string;
-  repo: string;
-  projectPath: string;
-} {
+/**
+ * Parse a git clone URL (https or SSH) into platform identity.
+ * Known hosts map to short platform ids; anything else uses the hostname
+ * as the platform so arbitrary forges can still be mirrored.
+ */
+export function parseCloneUrl(url: string): CloneIdentity {
   if (!url || typeof url !== 'string' || url.length > 2000) {
     throw new Error('Invalid repository URL');
   }
@@ -83,45 +102,99 @@ export function parseCloneUrl(url: string): {
 
   const sshMatch = cleaned.match(/^git@([^:]+):(.+)$/);
   if (sshMatch) {
-    const host = sshMatch[1];
+    const rawHost = sshMatch[1];
+    const hostname = rawHost.toLowerCase().replace(/^www\./, '');
     const repoPath = sshMatch[2];
-    if (host === 'github.com') {
-      return finalizeCloneIdentity('github', repoPath);
-    }
-    if (host === 'gitlab.com') {
-      return finalizeCloneIdentity('gitlab', repoPath);
-    }
+    const platform = platformFromHost(hostname);
+    const kind = knownApiKind(platform);
+    return finalizeCloneIdentity(platform, hostname, repoPath, {
+      strictTwoSegment: kind === 'github' || kind === 'forgejo',
+    });
   }
 
-  const httpsMatch = cleaned.match(/^https:\/\/([^/]+)\/(.+)$/);
+  const httpsMatch = cleaned.match(/^https?:\/\/([^/]+)\/(.+)$/i);
   if (httpsMatch) {
-    const host = httpsMatch[1].replace(/^www\./, '');
-    const repoPath = httpsMatch[2];
+    const hostPort = httpsMatch[1];
     // Reject userinfo smuggled into host
-    if (host.includes('@')) {
+    if (hostPort.includes('@')) {
       throw new Error('Invalid repository URL');
     }
-    if (host === 'github.com') {
-      return finalizeCloneIdentity('github', repoPath);
+    let hostname = hostPort;
+    let port: string | null = null;
+    if (hostPort.includes(':')) {
+      const [h, p] = hostPort.split(':');
+      hostname = h!;
+      port = p || null;
     }
-    if (host === 'gitlab.com') {
-      return finalizeCloneIdentity('gitlab', repoPath);
+    hostname = hostname.toLowerCase().replace(/^www\./, '');
+    // IPv6 or empty host
+    if (!hostname || hostname.startsWith('[')) {
+      throw new Error('Invalid repository URL');
     }
+    const repoPath = httpsMatch[2];
+    const platform = platformFromHost(hostname);
+    const kind = knownApiKind(platform);
+    return finalizeCloneIdentity(platform, hostname, repoPath, {
+      strictTwoSegment: kind === 'github' || kind === 'forgejo',
+      port,
+    });
   }
 
   throw new Error(
-    `Unsupported repository URL: ${url}. Only github.com and gitlab.com (https or SSH) are supported.`
+    `Unsupported repository URL: ${url}. Provide an https or SSH git clone URL (e.g. https://host/owner/repo.git).`
   );
 }
 
+export type FetchReleasesOptions = {
+  /** Clone URL used to resolve host/port for Forgejo detection & API base. */
+  cloneUrl?: string | null;
+};
+
+/**
+ * Fetch release metadata for a repo.
+ * - Returns a list (possibly empty) when a releases API was successfully used.
+ * - Returns `null` when the host has no supported API (plain git mirror only)
+ *   so callers do not treat that as an upstream wipe.
+ */
 export async function fetchReleases(
-  platform: 'github' | 'gitlab',
-  projectPath: string
-): Promise<ReleaseData[]> {
-  if (platform === 'github') {
+  platform: string,
+  projectPath: string,
+  options: FetchReleasesOptions = {}
+): Promise<ReleaseData[] | null> {
+  const kind = knownApiKind(platform);
+  if (kind === 'github') {
     return fetchGitHubReleases(projectPath);
   }
-  return fetchGitLabReleases(projectPath);
+  if (kind === 'gitlab') {
+    return fetchGitLabReleases(projectPath);
+  }
+  if (kind === 'forgejo') {
+    const host =
+      hostInfoFromCloneUrl(options.cloneUrl) ?? {
+        hostname: platform === 'codeberg' ? 'codeberg.org' : platform,
+        port: null,
+      };
+    const parts = projectPath.split('/').filter(Boolean);
+    const owner = parts[0]!;
+    const name = parts[parts.length - 1]!;
+    return fetchForgejoReleases(host.hostname, owner, name, host.port);
+  }
+
+  // Arbitrary host: auto-detect Forgejo/Gitea API
+  const host = hostInfoFromCloneUrl(options.cloneUrl) ?? {
+    hostname: platform,
+    port: null,
+  };
+  if (!host.hostname) return null;
+
+  const isForgejo = await resolveForgejoHost(host.hostname, host.port);
+  if (!isForgejo) return null;
+
+  const parts = projectPath.split('/').filter(Boolean);
+  if (parts.length < 2) return null;
+  const owner = parts[0]!;
+  const name = parts[parts.length - 1]!;
+  return fetchForgejoReleases(host.hostname, owner, name, host.port);
 }
 
 async function fetchGitHubReleases(repoPath: string): Promise<ReleaseData[]> {
@@ -186,12 +259,18 @@ async function fetchGitLabReleases(projectPath: string): Promise<ReleaseData[]> 
   }));
 }
 
+export type DownloadAssetOptions = {
+  /** Additional hostnames trusted for this download (e.g. repo's forge host). */
+  extraTrustedHosts?: string[];
+};
+
 export async function downloadReleaseAsset(
   url: string,
-  destPath: string
+  destPath: string,
+  options: DownloadAssetOptions = {}
 ): Promise<boolean> {
   try {
-    const trusted = parseTrustedAssetUrl(url);
+    const trusted = parseTrustedAssetUrl(url, options.extraTrustedHosts);
     if (!trusted) {
       console.warn(`[releases] refusing untrusted asset URL: ${url.slice(0, 120)}`);
       return false;
@@ -206,7 +285,12 @@ export async function downloadReleaseAsset(
     const dir = path.dirname(destPath);
     fs.mkdirSync(dir, { recursive: true });
 
-    const token = process.env.GITHUB_TOKEN || process.env.GITLAB_TOKEN;
+    const token =
+      process.env.GITHUB_TOKEN ||
+      process.env.GITLAB_TOKEN ||
+      process.env.FORGEJO_TOKEN ||
+      process.env.CODEBERG_TOKEN ||
+      process.env.GITEA_TOKEN;
     const headers: Record<string, string> = { 'User-Agent': 'gharchive' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
@@ -222,7 +306,10 @@ export async function downloadReleaseAsset(
       if (res.status >= 300 && res.status < 400) {
         const loc = res.headers.get('location');
         if (!loc) return false;
-        const next = parseTrustedAssetUrl(new URL(loc, current).toString());
+        const next = parseTrustedAssetUrl(
+          new URL(loc, current).toString(),
+          options.extraTrustedHosts
+        );
         if (!next) {
           console.warn(
             `[releases] asset redirect to untrusted host blocked: ${loc.slice(0, 120)}`

@@ -11,11 +11,12 @@ import {
 } from '@/lib/safe-url';
 
 describe('isTrustedAssetHost', () => {
-  it('accepts GitHub and GitLab hosts', () => {
+  it('accepts GitHub, GitLab, and Codeberg hosts', () => {
     expect(isTrustedAssetHost('github.com')).toBe(true);
     expect(isTrustedAssetHost('api.github.com')).toBe(true);
     expect(isTrustedAssetHost('objects.githubusercontent.com')).toBe(true);
     expect(isTrustedAssetHost('gitlab.com')).toBe(true);
+    expect(isTrustedAssetHost('codeberg.org')).toBe(true);
   });
 
   it('accepts githubusercontent subdomains', () => {
@@ -23,6 +24,13 @@ describe('isTrustedAssetHost', () => {
       true
     );
     expect(isTrustedAssetHost('foo.bar.githubusercontent.com')).toBe(true);
+  });
+
+  it('accepts extra trusted hosts for per-repo forges', () => {
+    expect(isTrustedAssetHost('git.example.com', ['git.example.com'])).toBe(
+      true
+    );
+    expect(isTrustedAssetHost('git.example.com')).toBe(false);
   });
 
   it('rejects arbitrary hosts', () => {
@@ -50,6 +58,26 @@ describe('parseTrustedAssetUrl', () => {
   it('rejects untrusted hosts', () => {
     expect(parseTrustedAssetUrl('https://evil.com/payload')).toBeNull();
     expect(parseTrustedAssetUrl('https://169.254.169.254/latest')).toBeNull();
+  });
+
+  it('accepts Codeberg release URLs', () => {
+    const u = parseTrustedAssetUrl(
+      'https://codeberg.org/o/r/releases/download/v1/a.bin'
+    );
+    expect(u?.hostname).toBe('codeberg.org');
+  });
+
+  it('accepts extra hosts for self-hosted forges', () => {
+    const u = parseTrustedAssetUrl(
+      'https://git.example.com/o/r/releases/download/v1/a.bin',
+      ['git.example.com']
+    );
+    expect(u?.hostname).toBe('git.example.com');
+    expect(
+      parseTrustedAssetUrl(
+        'https://git.example.com/o/r/releases/download/v1/a.bin'
+      )
+    ).toBeNull();
   });
 
   it('rejects credentials in URL', () => {

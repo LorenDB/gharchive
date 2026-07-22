@@ -71,7 +71,8 @@ You may still run:
 
 ## Key features
 
-- Repo mirror + release asset archive (GitHub REST API, GitLab API)
+- Repo mirror + release asset archive (GitHub REST API, GitLab API, Forgejo/Codeberg API)
+- Arbitrary clone URLs: unknown hosts still mirror git; rich meta/releases when Forgejo/Gitea is detected via `/api/v1/version`
 - File tree / blob browser from bare mirrors (`/api/repos/[id]/tree`, `/blob`, `/raw`)
 - Settings: auto-sync interval, asset download limits, memory thresholds
 - Lists/tags (local + imported from GitHub star lists via GraphQL)

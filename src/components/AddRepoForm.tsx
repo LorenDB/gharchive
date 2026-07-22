@@ -67,8 +67,9 @@ export default function AddRepoForm({ onAdded }: { onAdded: () => void }) {
               </button>
             </div>
             <p className="text-sm text-ink-400 mb-5">
-              Paste a GitHub or GitLab clone URL. We&apos;ll mirror the repo and pull
-              releases immediately.
+              Paste any git clone URL (GitHub, GitLab, Codeberg, or other hosts).
+              We&apos;ll mirror the repo and pull releases when the host supports
+              them.
             </p>
             <form onSubmit={handleSubmit}>
               <label className="label" htmlFor="clone-url">
@@ -79,7 +80,7 @@ export default function AddRepoForm({ onAdded }: { onAdded: () => void }) {
                 type="text"
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://github.com/owner/repo.git"
+                placeholder="https://codeberg.org/owner/repo.git"
                 className="input font-mono text-[13px]"
                 autoFocus
                 disabled={loading}

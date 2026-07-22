@@ -17,23 +17,42 @@ const TRUSTED_ASSET_HOSTS = new Set([
   'gitlab.com',
   'www.gitlab.com',
   'cdn.gitlab.com',
+  // Codeberg (Forgejo) + release downloads stay on the same host
+  'codeberg.org',
+  'www.codeberg.org',
 ]);
 
+function normalizeHost(hostname: string): string {
+  return hostname.toLowerCase().replace(/\.$/, '');
+}
+
 /** True when hostname is an exact trusted host or a githubusercontent subdomain. */
-export function isTrustedAssetHost(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/\.$/, '');
+export function isTrustedAssetHost(
+  hostname: string,
+  extraHosts?: Iterable<string>
+): boolean {
+  const host = normalizeHost(hostname);
   if (TRUSTED_ASSET_HOSTS.has(host)) return true;
   // GitHub release CDN uses rotating subdomains
   if (host.endsWith('.githubusercontent.com')) return true;
   if (host.endsWith('.gitlab-static.net')) return true;
+  if (extraHosts) {
+    for (const h of extraHosts) {
+      if (normalizeHost(h) === host) return true;
+    }
+  }
   return false;
 }
 
 /**
  * Validate an asset download URL scheme + host.
  * Returns the parsed URL or null if untrusted.
+ * @param extraHosts Optional per-download host allowlist (e.g. the repo's forge host).
  */
-export function parseTrustedAssetUrl(raw: string): URL | null {
+export function parseTrustedAssetUrl(
+  raw: string,
+  extraHosts?: Iterable<string>
+): URL | null {
   if (!raw || typeof raw !== 'string' || raw.length > 4000) return null;
   let u: URL;
   try {
@@ -44,7 +63,7 @@ export function parseTrustedAssetUrl(raw: string): URL | null {
   if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
   // Prefer HTTPS in production; allow http only for localhost-style (never for assets)
   if (u.protocol === 'http:') return null;
-  if (!isTrustedAssetHost(u.hostname)) return null;
+  if (!isTrustedAssetHost(u.hostname, extraHosts)) return null;
   // Block credentials in URL
   if (u.username || u.password) return null;
   return u;

@@ -179,7 +179,8 @@ export interface RepoList {
 /** Shared on-disk content for a (platform, owner, name) identity. */
 export interface Archive {
   id: number;
-  platform: 'github' | 'gitlab';
+  /** Platform id: github | gitlab | codeberg | or hostname for arbitrary hosts */
+  platform: string;
   owner: string;
   name: string;
   clone_url: string;
@@ -227,7 +228,8 @@ export interface Repo {
   id: number;
   owner_id: string;
   archive_id: number;
-  platform: 'github' | 'gitlab';
+  /** Platform id: github | gitlab | codeberg | or hostname for arbitrary hosts */
+  platform: string;
   owner: string;
   name: string;
   clone_url: string;
@@ -428,7 +430,7 @@ function migrateToArchives(d: Data): void {
   // Legacy shape: repos held full fields + optional missing archive_id
   type LegacyRepo = RepoMembership &
     Partial<Archive> & {
-      platform?: 'github' | 'gitlab';
+      platform?: string;
       owner?: string;
       name?: string;
       clone_url?: string;
@@ -773,12 +775,12 @@ function migrate(raw: Record<string, unknown>): Data {
 }
 
 /**
- * Infer github|gitlab from a clone URL host. Returns null if unknown.
- * Kept local to avoid circular imports with releases.ts.
+ * Infer platform id from a clone URL host. Returns null if unknown.
+ * Kept local to avoid circular imports with releases.ts / platform.ts.
  */
 function inferPlatformFromCloneUrl(
   cloneUrl: string | null | undefined
-): 'github' | 'gitlab' | null {
+): string | null {
   if (!cloneUrl || typeof cloneUrl !== 'string') return null;
   const s = cloneUrl.trim().toLowerCase();
   // git@gitlab.com:group/project.git  or  https://gitlab.com/...
@@ -795,6 +797,13 @@ function inferPlatformFromCloneUrl(
     s.startsWith('git@github.com:')
   ) {
     return 'github';
+  }
+  if (
+    /(^|[@/.])codeberg\.org([/:]|$)/.test(s) ||
+    s.includes('://codeberg.org/') ||
+    s.startsWith('git@codeberg.org:')
+  ) {
+    return 'codeberg';
   }
   return null;
 }
@@ -1417,7 +1426,7 @@ export function linkUserToArchive(
  */
 export function addRepo(
   repo: {
-    platform: 'github' | 'gitlab';
+    platform: string;
     owner: string;
     name: string;
     clone_url: string;

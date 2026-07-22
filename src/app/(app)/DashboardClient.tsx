@@ -164,7 +164,7 @@ export default function DashboardClient({
           <p className="text-sm text-ink-400 max-w-sm mx-auto mb-6">
             {activeList
               ? 'Assign repos to this list from a repo page, or import stars.'
-              : 'Mirror any public GitHub or GitLab repository, or import your starred repos.'}
+              : 'Mirror any public git repository (GitHub, GitLab, Codeberg, or other hosts), or import your starred repos.'}
           </p>
           <div className="flex flex-wrap justify-center gap-2">
             <Link href="/import" className="btn-secondary">
