@@ -11,10 +11,12 @@ import {
   getSettings,
   getGithubAccountPublic,
   listUsersWithUsage,
+  getUserStorageDetail,
   DEFAULT_SETTINGS,
   type Settings,
   type List,
   type UserUsageSummary,
+  type UserStorageDetail,
 } from '@/lib/db';
 import { getSchedulerStatus } from '@/lib/scheduler';
 import {
@@ -141,6 +143,8 @@ export async function getSettingsPageData(user: SessionUser): Promise<{
   lists: { id: number; name: string; github_list_id: string | null }[];
   /** Present only for admins — registered users with storage attribution. */
   users: UserUsageSummary[] | null;
+  /** Current user's storage usage + largest-repo breakdown. */
+  storage: UserStorageDetail;
 }> {
   const settings = getSettings();
   const admin = isAdmin(user);
@@ -174,5 +178,6 @@ export async function getSettingsPageData(user: SessionUser): Promise<{
     github_account: getGithubAccountPublic(),
     lists: allLists,
     users: admin ? listUsersWithUsage() : null,
+    storage: getUserStorageDetail(user.id, 5),
   };
 }

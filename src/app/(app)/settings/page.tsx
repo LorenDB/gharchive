@@ -23,6 +23,7 @@ export default async function SettingsPage() {
         github_account: data.github_account,
         lists: data.lists,
         users: data.users,
+        storage: data.storage,
       }}
     />
   );

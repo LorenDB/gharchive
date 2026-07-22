@@ -90,6 +90,7 @@ export async function GET() {
       disk: data.disk,
       is_admin: data.is_admin,
       users: data.users,
+      storage: data.storage,
     });
   });
 }

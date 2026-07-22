@@ -86,6 +86,29 @@ interface UserUsageSummary {
   storage_bytes: number;
 }
 
+interface RepoStorageEntry {
+  repo_id: number;
+  archive_id: number;
+  platform: string;
+  owner: string;
+  name: string;
+  is_private: boolean;
+  total_bytes: number;
+  mirror_bytes: number;
+  asset_bytes: number;
+  attributed_bytes: number;
+  member_count: number;
+}
+
+interface UserStorageDetail {
+  total_bytes: number;
+  repo_count: number;
+  private_repo_count: number;
+  largest_repos: RepoStorageEntry[];
+  other_bytes: number;
+  other_repo_count: number;
+}
+
 const ALERT_CATEGORY_ROWS: {
   key: keyof Settings;
   label: string;
@@ -170,6 +193,7 @@ type InitialSettingsData = {
   } | null;
   lists: { id: number; name: string; github_list_id: string | null }[];
   users: UserUsageSummary[] | null;
+  storage: UserStorageDetail;
 };
 
 export default function SettingsClient({
@@ -223,6 +247,16 @@ export default function SettingsClient({
   );
   const [hostBusy, setHostBusy] = useState<string | null>(null);
   const [users, setUsers] = useState<UserUsageSummary[] | null>(initial.users);
+  const [storage, setStorage] = useState<UserStorageDetail>(
+    initial.storage || {
+      total_bytes: 0,
+      repo_count: 0,
+      private_repo_count: 0,
+      largest_repos: [],
+      other_bytes: 0,
+      other_repo_count: 0,
+    }
+  );
   const [tab, setTab] = useState<SettingsTab>('settings');
 
   async function linkGithub(e: React.FormEvent) {
@@ -473,6 +507,7 @@ export default function SettingsClient({
         setScheduler(s.scheduler);
         if (Array.isArray(s.users)) setUsers(s.users);
         if (s.disk) setDisk(s.disk);
+        if (s.storage) setStorage(s.storage);
       }
     } catch (err: any) {
       setMessage({ type: 'err', text: err.message });
@@ -481,13 +516,14 @@ export default function SettingsClient({
     }
   }
 
-  async function refreshUsers() {
+  async function refreshAdminData() {
     try {
       const res = await fetch('/api/settings');
       if (!res.ok) return;
       const s = await res.json();
       if (Array.isArray(s.users)) setUsers(s.users);
       if (s.disk) setDisk(s.disk);
+      if (s.storage) setStorage(s.storage);
     } catch {
       // ignore refresh errors
     }
@@ -1239,6 +1275,153 @@ export default function SettingsClient({
               </div>
             </section>
 
+            {/* Storage usage (current user) */}
+            <section className="surface p-5 sm:p-6">
+              <div className="flex items-start justify-between gap-4 mb-1">
+                <div>
+                  <h2 className="text-base font-semibold text-white">Storage usage</h2>
+                  <p className="hint !mt-1">
+                    Space attributed to your archives. Shared public mirrors are split
+                    evenly among members who archive them.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn-ghost !py-1.5 !px-3 text-xs shrink-0"
+                  onClick={refreshAdminData}
+                >
+                  Refresh
+                </button>
+              </div>
+
+              <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 gap-3 text-sm">
+                <div className="rounded-lg border border-ink-800 bg-ink-950/40 px-3 py-2.5">
+                  <p className="text-[11px] uppercase tracking-wide text-ink-500 mb-0.5">
+                    Total
+                  </p>
+                  <p className="font-mono tabular-nums text-ink-100">
+                    {formatBytes(storage.total_bytes)}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-ink-800 bg-ink-950/40 px-3 py-2.5">
+                  <p className="text-[11px] uppercase tracking-wide text-ink-500 mb-0.5">
+                    Repos
+                  </p>
+                  <p className="font-mono tabular-nums text-ink-100">
+                    {storage.repo_count}
+                    {storage.private_repo_count > 0 && (
+                      <span className="text-ink-500 text-xs font-sans ml-1">
+                        ({storage.private_repo_count} private)
+                      </span>
+                    )}
+                  </p>
+                </div>
+                {storage.largest_repos.length > 0 && storage.total_bytes > 0 && (
+                  <div className="rounded-lg border border-ink-800 bg-ink-950/40 px-3 py-2.5 col-span-2 sm:col-span-1">
+                    <p className="text-[11px] uppercase tracking-wide text-ink-500 mb-0.5">
+                      Largest share
+                    </p>
+                    <p className="font-mono tabular-nums text-ink-100">
+                      {Math.round(
+                        (storage.largest_repos[0]!.attributed_bytes /
+                          storage.total_bytes) *
+                          100
+                      )}
+                      %
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {storage.repo_count === 0 ? (
+                <p className="text-sm text-ink-500 mt-4">
+                  No archives yet — add a repository to start using storage.
+                </p>
+              ) : (
+                <div className="mt-5">
+                  <p className="text-[11px] uppercase tracking-wide text-ink-500 mb-2">
+                    Largest repositories
+                  </p>
+                  <ul className="rounded-lg border border-ink-800 bg-ink-950/40 divide-y divide-ink-800/80">
+                    {storage.largest_repos.map((repo) => {
+                      const pct =
+                        storage.total_bytes > 0
+                          ? Math.round(
+                              (repo.attributed_bytes / storage.total_bytes) * 100
+                            )
+                          : 0;
+                      return (
+                        <li key={repo.repo_id} className="px-3 py-2.5">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <Link
+                                href={`/repos/${repo.repo_id}`}
+                                className="text-sm font-medium text-ink-100 hover:text-amber-300 truncate block"
+                              >
+                                {repo.owner}/{repo.name}
+                              </Link>
+                              <p className="text-[11px] text-ink-500 mt-0.5">
+                                <span className="font-mono">{repo.platform}</span>
+                                {repo.is_private && (
+                                  <span className="ml-1.5 text-ink-600">private</span>
+                                )}
+                                {repo.member_count > 1 && (
+                                  <span className="ml-1.5">
+                                    shared ×{repo.member_count}
+                                  </span>
+                                )}
+                                {(repo.mirror_bytes > 0 || repo.asset_bytes > 0) && (
+                                  <span className="ml-1.5 text-ink-600">
+                                    mirror {formatBytes(repo.mirror_bytes)}
+                                    {repo.asset_bytes > 0 && (
+                                      <> · assets {formatBytes(repo.asset_bytes)}</>
+                                    )}
+                                  </span>
+                                )}
+                              </p>
+                            </div>
+                            <div className="text-right shrink-0">
+                              <p className="font-mono tabular-nums text-sm text-ink-200">
+                                {formatBytes(repo.attributed_bytes)}
+                              </p>
+                              <p className="text-[11px] text-ink-600 tabular-nums">
+                                {pct}%
+                                {repo.member_count > 1 &&
+                                  repo.total_bytes !== repo.attributed_bytes && (
+                                    <span className="ml-1">
+                                      of {formatBytes(repo.total_bytes)}
+                                    </span>
+                                  )}
+                              </p>
+                            </div>
+                          </div>
+                          {storage.total_bytes > 0 && (
+                            <div className="mt-2 h-1 rounded-full bg-ink-800 overflow-hidden">
+                              <div
+                                className="h-full rounded-full bg-amber-400/70"
+                                style={{ width: `${Math.max(pct, pct > 0 ? 2 : 0)}%` }}
+                              />
+                            </div>
+                          )}
+                        </li>
+                      );
+                    })}
+                    {storage.other_repo_count > 0 && (
+                      <li className="px-3 py-2.5 flex items-center justify-between gap-3 text-sm text-ink-500">
+                        <span>
+                          {storage.other_repo_count} other repo
+                          {storage.other_repo_count === 1 ? '' : 's'}
+                        </span>
+                        <span className="font-mono tabular-nums">
+                          {formatBytes(storage.other_bytes)}
+                        </span>
+                      </li>
+                    )}
+                  </ul>
+                </div>
+              )}
+            </section>
+
             {/* Scheduler status */}
             <section className="surface p-5 sm:p-6">
               <h2 className="text-base font-semibold text-white mb-4">Scheduler status</h2>
@@ -1686,7 +1869,7 @@ export default function SettingsClient({
                 <button
                   type="button"
                   className="btn-ghost !py-1.5 !px-3 text-xs shrink-0"
-                  onClick={refreshUsers}
+                  onClick={refreshAdminData}
                 >
                   Refresh
                 </button>

@@ -8,6 +8,7 @@ import {
   ensureAppUser,
   getDb,
   linkUserToArchive,
+  getUserStorageDetail,
   listUsersWithUsage,
   resetDbForTests,
   updateSettings,
@@ -263,5 +264,62 @@ describe('listUsersWithUsage', () => {
     // Public 1000 bytes / 2 members = 500 each; alice also gets private 400
     expect(alice!.storage_bytes).toBe(900);
     expect(bob!.storage_bytes).toBe(500);
+
+    const aliceDetail = getUserStorageDetail('alice', 5);
+    expect(aliceDetail.total_bytes).toBe(900);
+    expect(aliceDetail.repo_count).toBe(2);
+    expect(aliceDetail.private_repo_count).toBe(1);
+    expect(aliceDetail.largest_repos).toHaveLength(2);
+    // Private 400 attributed fully ranks below shared half of 1000 (=500)
+    expect(aliceDetail.largest_repos[0]!.name).toBe('shared');
+    expect(aliceDetail.largest_repos[0]!.attributed_bytes).toBe(500);
+    expect(aliceDetail.largest_repos[0]!.member_count).toBe(2);
+    expect(aliceDetail.largest_repos[1]!.name).toBe('secret');
+    expect(aliceDetail.largest_repos[1]!.attributed_bytes).toBe(400);
+    expect(aliceDetail.other_repo_count).toBe(0);
+
+    const bobDetail = getUserStorageDetail('bob', 1);
+    expect(bobDetail.total_bytes).toBe(500);
+    expect(bobDetail.largest_repos).toHaveLength(1);
+    expect(bobDetail.other_repo_count).toBe(0);
+  });
+
+  it('limits largest_repos and rolls the rest into other_bytes', () => {
+    const sizes = [5000, 4000, 3000, 2000, 1000, 500];
+    for (let i = 0; i < sizes.length; i++) {
+      const mirror = path.join(
+        tempDir,
+        'mirrors',
+        'github',
+        'org',
+        `repo${i}.git`
+      );
+      fs.mkdirSync(mirror, { recursive: true });
+      fs.writeFileSync(path.join(mirror, 'blob'), 'z'.repeat(sizes[i]!));
+      const arch = createArchive({
+        platform: 'github',
+        owner: 'org',
+        name: `repo${i}`,
+        clone_url: `https://github.com/org/repo${i}.git`,
+        mirror_path: mirror,
+        last_synced_at: null,
+        is_private: false,
+      });
+      runAsUser('solo', () => linkUserToArchive(arch.id));
+    }
+
+    const detail = getUserStorageDetail('solo', 5);
+    expect(detail.repo_count).toBe(6);
+    expect(detail.largest_repos).toHaveLength(5);
+    expect(detail.largest_repos.map((r) => r.name)).toEqual([
+      'repo0',
+      'repo1',
+      'repo2',
+      'repo3',
+      'repo4',
+    ]);
+    expect(detail.other_repo_count).toBe(1);
+    expect(detail.other_bytes).toBe(500);
+    expect(detail.total_bytes).toBe(5000 + 4000 + 3000 + 2000 + 1000 + 500);
   });
 });

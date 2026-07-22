@@ -1232,32 +1232,42 @@ export interface UserUsageSummary {
   storage_bytes: number;
 }
 
-/**
- * List every known user with membership counts and attributed on-disk storage.
- * Shared public archives count `size / memberCount` toward each member.
- * Does not require a user context (admin-only callers).
- */
-export function listUsersWithUsage(): UserUsageSummary[] {
-  const d = load();
-  const appUsers = new Map(d.users.map((u) => [u.id, u]));
-  const ids = new Set(listUserIds());
+/** One membership's storage contribution for the current (or given) user. */
+export interface RepoStorageEntry {
+  /** User-facing membership id (for /repos/[id] links) */
+  repo_id: number;
+  archive_id: number;
+  platform: string;
+  owner: string;
+  name: string;
+  is_private: boolean;
+  /** Full on-disk size of this archive (mirror + assets) */
+  total_bytes: number;
+  /** Mirror tree size on disk */
+  mirror_bytes: number;
+  /** Downloaded release assets on disk */
+  asset_bytes: number;
+  /** Bytes attributed to this user (full if private/sole, else split) */
+  attributed_bytes: number;
+  /** How many users share this archive */
+  member_count: number;
+}
 
-  const membersByArchive = new Map<number, Set<string>>();
-  const repoCountByUser = new Map<string, number>();
-  const privateCountByUser = new Map<string, number>();
+/** Per-user storage view with largest-repo breakdown. */
+export interface UserStorageDetail {
+  total_bytes: number;
+  repo_count: number;
+  private_repo_count: number;
+  /** Top N repos by attributed size (default 5) */
+  largest_repos: RepoStorageEntry[];
+  /** Attributed bytes for repos outside largest_repos */
+  other_bytes: number;
+  /** Number of repos not listed in largest_repos */
+  other_repo_count: number;
+}
 
-  for (const m of d.repos) {
-    ids.add(m.owner_id);
-    repoCountByUser.set(m.owner_id, (repoCountByUser.get(m.owner_id) || 0) + 1);
-    let set = membersByArchive.get(m.archive_id);
-    if (!set) {
-      set = new Set();
-      membersByArchive.set(m.archive_id, set);
-    }
-    set.add(m.owner_id);
-  }
-
-  // Release asset bytes keyed by archive_id (prefer on-disk size when path exists)
+/** Release asset bytes keyed by archive_id (prefer on-disk size when path exists). */
+function assetBytesByArchiveMap(d: Data): Map<number, number> {
   const assetBytesByArchive = new Map<number, number>();
   const releaseToArchive = new Map<number, number>();
   for (const rel of d.releases) {
@@ -1283,6 +1293,41 @@ export function listUsersWithUsage(): UserUsageSummary[] {
       (assetBytesByArchive.get(archiveId) || 0) + bytes
     );
   }
+  return assetBytesByArchive;
+}
+
+function membersByArchiveMap(d: Data): Map<number, Set<string>> {
+  const membersByArchive = new Map<number, Set<string>>();
+  for (const m of d.repos) {
+    let set = membersByArchive.get(m.archive_id);
+    if (!set) {
+      set = new Set();
+      membersByArchive.set(m.archive_id, set);
+    }
+    set.add(m.owner_id);
+  }
+  return membersByArchive;
+}
+
+/**
+ * List every known user with membership counts and attributed on-disk storage.
+ * Shared public archives count `size / memberCount` toward each member.
+ * Does not require a user context (admin-only callers).
+ */
+export function listUsersWithUsage(): UserUsageSummary[] {
+  const d = load();
+  const appUsers = new Map(d.users.map((u) => [u.id, u]));
+  const ids = new Set(listUserIds());
+
+  const membersByArchive = membersByArchiveMap(d);
+  const assetBytesByArchive = assetBytesByArchiveMap(d);
+  const repoCountByUser = new Map<string, number>();
+  const privateCountByUser = new Map<string, number>();
+
+  for (const m of d.repos) {
+    ids.add(m.owner_id);
+    repoCountByUser.set(m.owner_id, (repoCountByUser.get(m.owner_id) || 0) + 1);
+  }
 
   const storageByUser = new Map<string, number>();
   for (const archive of d.archives) {
@@ -1290,8 +1335,11 @@ export function listUsersWithUsage(): UserUsageSummary[] {
     if (!members || members.size === 0) continue;
 
     if (archive.is_private) {
-      for (const uid of members) {
-        privateCountByUser.set(uid, (privateCountByUser.get(uid) || 0) + 1);
+      for (const memberId of members) {
+        privateCountByUser.set(
+          memberId,
+          (privateCountByUser.get(memberId) || 0) + 1
+        );
       }
     }
 
@@ -1300,8 +1348,8 @@ export function listUsersWithUsage(): UserUsageSummary[] {
     const total = mirrorBytes + assetBytes;
     if (total <= 0) continue;
     const share = total / members.size;
-    for (const uid of members) {
-      storageByUser.set(uid, (storageByUser.get(uid) || 0) + share);
+    for (const memberId of members) {
+      storageByUser.set(memberId, (storageByUser.get(memberId) || 0) + share);
     }
   }
 
@@ -1332,6 +1380,73 @@ export function listUsersWithUsage(): UserUsageSummary[] {
   });
 
   return summaries;
+}
+
+/**
+ * Storage usage for one user, with the largest repos by attributed size.
+ * Defaults to the current user context when `userId` is omitted.
+ */
+export function getUserStorageDetail(
+  userId?: string,
+  topN = 5
+): UserStorageDetail {
+  const d = load();
+  const uid = userId ?? getRequiredUserId();
+  const membersByArchive = membersByArchiveMap(d);
+  const assetBytesByArchive = assetBytesByArchiveMap(d);
+  const memberships = d.repos.filter((m) => m.owner_id === uid);
+
+  const entries: RepoStorageEntry[] = [];
+  let privateRepoCount = 0;
+
+  for (const m of memberships) {
+    const archive = archiveById(d, m.archive_id);
+    if (!archive) continue;
+    const members = membersByArchive.get(archive.id);
+    const memberCount = members?.size || 1;
+    const mirrorBytes = dirSizeSafe(archive.mirror_path || '');
+    const assetBytes = assetBytesByArchive.get(archive.id) || 0;
+    const totalBytes = mirrorBytes + assetBytes;
+    const attributedBytes = totalBytes / memberCount;
+    const isPrivate = Boolean(archive.is_private);
+    if (isPrivate) privateRepoCount++;
+
+    entries.push({
+      repo_id: m.id,
+      archive_id: archive.id,
+      platform: archive.platform,
+      owner: archive.owner,
+      name: archive.name,
+      is_private: isPrivate,
+      total_bytes: Math.round(totalBytes),
+      mirror_bytes: Math.round(mirrorBytes),
+      asset_bytes: Math.round(assetBytes),
+      attributed_bytes: Math.round(attributedBytes),
+      member_count: memberCount,
+    });
+  }
+
+  entries.sort((a, b) => {
+    if (b.attributed_bytes !== a.attributed_bytes) {
+      return b.attributed_bytes - a.attributed_bytes;
+    }
+    return `${a.owner}/${a.name}`.localeCompare(`${b.owner}/${b.name}`);
+  });
+
+  const limit = Math.max(0, Math.min(50, Math.round(topN)));
+  const largest = entries.slice(0, limit);
+  const rest = entries.slice(limit);
+  const otherBytes = rest.reduce((sum, e) => sum + e.attributed_bytes, 0);
+  const totalBytes = entries.reduce((sum, e) => sum + e.attributed_bytes, 0);
+
+  return {
+    total_bytes: totalBytes,
+    repo_count: entries.length,
+    private_repo_count: privateRepoCount,
+    largest_repos: largest,
+    other_bytes: otherBytes,
+    other_repo_count: rest.length,
+  };
 }
 
 // ── Scoped db view ──────────────────────────────────────────────
