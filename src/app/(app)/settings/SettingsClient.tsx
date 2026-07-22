@@ -222,8 +222,11 @@ export default function SettingsClient({
     if (!confirm('Unlink GitHub account? The token will be removed from local storage.'))
       return;
     setGhBusy(true);
+    setMessage(null);
     try {
-      await fetch('/api/github', { method: 'DELETE' });
+      const res = await fetch('/api/github', { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to unlink');
       setGhAccount(null);
       setMessage({ type: 'ok', text: 'GitHub account unlinked' });
     } catch (err: any) {
