@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import MarkdownView from '@/components/MarkdownView';
 import { formatBytes, formatDateShort } from '@/lib/format';
 
 interface Asset {
@@ -78,8 +79,8 @@ export default function ReleasesViewer({
             {isOpen && (
               <div className="px-4 sm:px-5 py-4 space-y-4">
                 {rel.body && (
-                  <div className="text-sm text-ink-400 whitespace-pre-wrap break-words max-h-64 overflow-y-auto leading-relaxed">
-                    {rel.body}
+                  <div className="max-h-64 overflow-y-auto">
+                    <MarkdownView content={rel.body} />
                   </div>
                 )}
 
