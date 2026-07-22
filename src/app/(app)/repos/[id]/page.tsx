@@ -384,7 +384,17 @@ export default function RepoDetail() {
         <Stat label="Releases" value={releases.length} />
         <Stat
           label="Mirror size"
-          value={repo.size_bytes != null ? formatBytes(repo.size_bytes) : '—'}
+          value={
+            repo.size_bytes != null ? (
+              <SizeChip
+                total={repo.size_bytes}
+                code={repo.code_size_bytes ?? 0}
+                assets={repo.asset_size_bytes ?? 0}
+              />
+            ) : (
+              '—'
+            )
+          }
         />
       </div>
 
@@ -498,13 +508,51 @@ function stripUrl(url: string): string {
   return url.replace(/^https?:\/\//, '').replace(/\/$/, '');
 }
 
-function Stat({ label, value }: { label: string; value: number | string }) {
+function Stat({ label, value }: { label: string; value: number | string | React.ReactNode }) {
   return (
     <div className="stat-card">
       <p className="text-[11px] uppercase tracking-wide text-ink-500 mb-1">
         {label}
       </p>
       <p className="text-xl font-semibold tabular-nums text-white">{value}</p>
+    </div>
+  );
+}
+
+function SizeChip({
+  total,
+  code,
+  assets,
+}: {
+  total: number;
+  code: number;
+  assets: number;
+}) {
+  const hasAssets = assets > 0;
+  const codePct = total > 0 ? (code / total) * 100 : 0;
+  const assetPct = total > 0 ? (assets / total) * 100 : 0;
+
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-xl font-semibold tabular-nums text-white">
+        {formatBytes(total)}
+      </span>
+      <div className="flex flex-col gap-0.5 text-[10px] leading-tight">
+        <span className="inline-flex items-center gap-1">
+          <span className="w-1.5 h-1.5 rounded bg-blue-400" />
+          <span className="text-ink-400">
+            Code {formatBytes(code)} ({codePct.toFixed(0)}%)
+          </span>
+        </span>
+        {hasAssets && (
+          <span className="inline-flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded bg-amber-400" />
+            <span className="text-ink-400">
+              Assets {formatBytes(assets)} ({assetPct.toFixed(0)}%)
+            </span>
+          </span>
+        )}
+      </div>
     </div>
   );
 }

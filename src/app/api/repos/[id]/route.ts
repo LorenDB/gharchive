@@ -34,6 +34,11 @@ export async function GET(
       sizeBytes: 0,
     }));
 
+    const { releaseAssets } = getDb();
+    const assetSizeBytes = releaseAssets
+      .filter((a) => a.file_path && fs.existsSync(a.file_path))
+      .reduce((sum, a) => sum + (a.size ?? 0), 0);
+
     // Strip on-disk mirror path from the API surface (clone_url is intentional)
     const { mirror_path: _mp, ...safeRepo } = repo;
 
@@ -42,7 +47,9 @@ export async function GET(
         ...safeRepo,
         branch_count: stats.branchCount,
         tag_count: stats.tagCount,
-        size_bytes: stats.sizeBytes,
+        size_bytes: stats.sizeBytes + assetSizeBytes,
+        code_size_bytes: stats.sizeBytes,
+        asset_size_bytes: assetSizeBytes,
         lists: getRepoLists(repo.id),
       },
       allLists: getLists(),
