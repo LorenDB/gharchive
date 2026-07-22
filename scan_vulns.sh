@@ -3,8 +3,8 @@
 
 set -euo pipefail
 
-#MODEL="openrouter/poolside/laguna-s-2.1:free"
-MODEL="opencode/deepseek-v4-flash-free"
+MODEL="openrouter/poolside/laguna-s-2.1:free"
+#MODEL="opencode/deepseek-v4-flash-free"
 PROMPT="Analyze this file for security vulnerabilities common in Node.js/TypeScript projects:
 - Injection flaws, path traversal, XSS, prototype pollution
 - Insecure dependencies, deserialization issues

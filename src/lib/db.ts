@@ -792,6 +792,14 @@ function load(): Data {
 }
 
 /**
+ * Preload db.json into the in-memory cache (process start / instrumentation).
+ * Avoids paying parse cost on the first HTTP request.
+ */
+export function warmDb(): void {
+  load();
+}
+
+/**
  * Clear in-memory cache so the next load() re-reads DATA_DIR/db.json.
  * Intended for unit tests only.
  */

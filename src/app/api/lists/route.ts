@@ -2,21 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
   getLists,
   addList,
-  getListCounts,
   LIST_COLORS,
 } from '@/lib/db';
 import { withApiUser, checkRateLimit, checkCsrf } from '@/lib/api-auth';
+import { getListFilters } from '@/lib/server-data';
 
 export async function GET() {
   return withApiUser(async () => {
-    const lists = getLists();
-    const counts = getListCounts();
-    return NextResponse.json({
-      lists: lists.map((l) => ({
-        ...l,
-        repo_count: counts[l.id] || 0,
-      })),
-    });
+    return NextResponse.json({ lists: getListFilters() });
   });
 }
 

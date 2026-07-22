@@ -18,48 +18,14 @@ import { withApiUser, checkRateLimit, checkCsrf } from '@/lib/api-auth';
 import { getImportStatus, enqueueRepoImport, type ImportItem } from '@/lib/import-stars';
 import { fetchRemoteRepoMeta } from '@/lib/remote-meta';
 import { tryGetUserId } from '@/lib/user-context';
+import { getRepoCards } from '@/lib/server-data';
 
 export async function GET(req: NextRequest) {
   return withApiUser(async () => {
-    const { repos } = getDb();
     const listIdParam = req.nextUrl.searchParams.get('list_id');
-    const listId = listIdParam ? parseInt(listIdParam, 10) : null;
-
-    let filtered = repos;
-    if (listId && !isNaN(listId)) {
-      filtered = repos.filter((r) =>
-        getRepoLists(r.id).some((l) => l.id === listId)
-      );
-    }
-
-    return NextResponse.json(
-      filtered
-        .map(({ clone_url, mirror_path, ...rest }) => ({
-          id: rest.id,
-          platform: rest.platform,
-          owner: rest.owner,
-          name: rest.name,
-          last_synced_at: rest.last_synced_at,
-          created_at: rest.created_at,
-          from_star: rest.from_star,
-          from_owned: rest.from_owned,
-          remote_description: rest.remote_description ?? null,
-          local_description: rest.local_description ?? null,
-          language: rest.language ?? null,
-          topics: rest.topics ?? [],
-          stargazers_count: rest.stargazers_count ?? null,
-          is_archived: Boolean(rest.is_archived),
-          is_private: Boolean(rest.is_private),
-          is_fork: Boolean(rest.is_fork),
-          lists: getRepoLists(rest.id).map((l) => ({
-            id: l.id,
-            name: l.name,
-            color: l.color,
-            source: l.source,
-          })),
-        }))
-        .sort((a, b) => b.id - a.id)
-    );
+    const parsed = listIdParam ? parseInt(listIdParam, 10) : NaN;
+    const listId = Number.isFinite(parsed) ? parsed : null;
+    return NextResponse.json(getRepoCards(listId));
   });
 }
 

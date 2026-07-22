@@ -11,10 +11,10 @@ interface ListBadge {
 
 interface Repo {
   id: number;
-  platform: 'github' | 'gitlab';
+  platform: 'github' | 'gitlab' | string;
   owner: string;
   name: string;
-  clone_url: string;
+  clone_url?: string;
   last_synced_at: string | null;
   created_at: string;
   from_star?: boolean;

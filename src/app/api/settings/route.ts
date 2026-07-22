@@ -20,7 +20,6 @@ import {
   isAlertsConfigured,
   type AlertCategory,
 } from '@/lib/alerts';
-import { getDiskInfo } from '@/lib/disk';
 
 const INTERVAL_OPTIONS = [1, 6, 12, 24, 48, 168] as const;
 
@@ -80,27 +79,16 @@ function parseAppriseUrls(value: unknown): string[] | { error: string } {
 
 export async function GET() {
   return withApiUser(async (user) => {
-    const settings = getSettings();
-    let disk = null;
-    try {
-      disk = await getDiskInfo();
-    } catch {
-      disk = null;
-    }
+    const { getSettingsPageData } = await import('@/lib/server-data');
+    const data = await getSettingsPageData(user);
     return NextResponse.json({
-      settings,
-      defaults: DEFAULT_SETTINGS,
-      interval_options: INTERVAL_OPTIONS,
-      scheduler: getSchedulerStatus(),
-      alerts: {
-        configured: isAlertsConfigured(settings),
-        categories: ALERT_CATEGORIES.map((id) => ({
-          id,
-          ...ALERT_CATEGORY_META[id as AlertCategory],
-        })),
-      },
-      disk,
-      is_admin: isAdmin(user),
+      settings: data.settings,
+      defaults: data.defaults,
+      interval_options: data.interval_options,
+      scheduler: data.scheduler,
+      alerts: data.alerts,
+      disk: data.disk,
+      is_admin: data.is_admin,
     });
   });
 }
