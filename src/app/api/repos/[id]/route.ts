@@ -34,9 +34,19 @@ export async function GET(
       sizeBytes: 0,
     }));
 
-    const { releaseAssets } = getDb();
+    const { releases, releaseAssets } = getDb();
+    const repoReleaseIds = new Set(
+      releases
+        .filter((r) => r.archive_id === repo.archive_id)
+        .map((r) => r.id)
+    );
     const assetSizeBytes = releaseAssets
-      .filter((a) => a.file_path && fs.existsSync(a.file_path))
+      .filter(
+        (a) =>
+          repoReleaseIds.has(a.release_id) &&
+          a.file_path &&
+          fs.existsSync(a.file_path)
+      )
       .reduce((sum, a) => sum + (a.size ?? 0), 0);
 
     // Strip on-disk mirror path from the API surface (clone_url is intentional)
