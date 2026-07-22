@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { findRepo, getGithubAccountPublic, getSettings } from '@/lib/db';
+import { findRepo, buildRepoLookup, identityKey, uid, getGithubAccountPublic, getSettings } from '@/lib/db';
 import { fetchOwnedRepos, validateGithubToken } from '@/lib/github';
 import {
   requireGithubToken,
@@ -10,6 +10,10 @@ import {
   scanAndMaybeImportOwned,
 } from '@/lib/import-stars';
 import { withApiUser } from '@/lib/api-auth';
+
+const CACHE_HEADERS = {
+  'Cache-Control': 'private, max-age=30, stale-while-revalidate=60',
+};
 
 /** Preview owned repositories for the linked account. */
 export async function GET() {
@@ -33,8 +37,12 @@ export async function GET() {
         }),
       ]);
 
+      // Bulk lookup: O(repos + owned) instead of O(owned × repos)
+      const userId = uid();
+      const lookup = buildRepoLookup(userId);
+
       const repos = owned.map((r) => {
-        const existing = findRepo('github', r.owner, r.name);
+        const existing = lookup.get(identityKey('github', r.owner, r.name));
         return {
           ...r,
           archived: Boolean(existing),
@@ -42,17 +50,20 @@ export async function GET() {
         };
       });
 
-      return NextResponse.json({
-        account,
-        user,
-        repos,
-        stats: {
-          total: repos.length,
-          archived: repos.filter((r) => r.archived).length,
-          forks: repos.filter((r) => r.fork).length,
-          private: repos.filter((r) => r.private).length,
+      return NextResponse.json(
+        {
+          account,
+          user,
+          repos,
+          stats: {
+            total: repos.length,
+            archived: repos.filter((r) => r.archived).length,
+            forks: repos.filter((r) => r.fork).length,
+            private: repos.filter((r) => r.private).length,
+          },
         },
-      });
+        { headers: CACHE_HEADERS }
+      );
     } catch (err: any) {
       return NextResponse.json({ error: err.message }, { status: 400 });
     }

@@ -324,7 +324,7 @@ function isLegacyOwner(ownerId: string | undefined | null): boolean {
   return !ownerId || ownerId === AUTOLOGIN_USER_ID;
 }
 
-function identityKey(
+export function identityKey(
   platform: string,
   owner: string,
   name: string
@@ -826,7 +826,7 @@ function save() {
   }
 }
 
-function uid(): string {
+export function uid(): string {
   return getRequiredUserId();
 }
 
@@ -1257,6 +1257,29 @@ export function findRepo(
     }
   }
   return undefined;
+}
+
+/**
+ * Build a bulk lookup map of (identityKey → { id, archiveId }) for the given
+ * user.  Much faster than calling findRepo() in a loop when you need to check
+ * many repos (e.g. annotating every star with its archived status).
+ */
+export function buildRepoLookup(
+  userId: string
+): Map<string, { id: number; archiveId: number }> {
+  const d = load();
+  const map = new Map<string, { id: number; archiveId: number }>();
+  for (const m of d.repos) {
+    if (m.owner_id !== userId) continue;
+    const a = archiveById(d, m.archive_id);
+    if (a) {
+      map.set(identityKey(a.platform, a.owner, a.name), {
+        id: m.id,
+        archiveId: m.archive_id,
+      });
+    }
+  }
+  return map;
 }
 
 export function getRepoById(id: number): Repo | undefined {

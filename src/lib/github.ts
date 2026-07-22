@@ -3,6 +3,28 @@ import { getGithubToken } from '@/lib/db';
 const GITHUB_API = 'https://api.github.com';
 const GITHUB_GQL = 'https://api.github.com/graphql';
 
+// ── In-memory TTL cache for GitHub API responses ────────────────
+
+interface CacheEntry<T> {
+  data: T;
+  expiresAt: number;
+}
+
+const CACHE_TTL = 3_600_000; // 1 hour
+
+function cached<T>(map: Map<string, CacheEntry<T>>, key: string): T | undefined {
+  const entry = map.get(key);
+  if (entry && Date.now() < entry.expiresAt) return entry.data;
+  return undefined;
+}
+
+function setCached<T>(map: Map<string, CacheEntry<T>>, key: string, data: T, ttl = CACHE_TTL): void {
+  map.set(key, { data, expiresAt: Date.now() + ttl });
+}
+
+const starsPreviewCache = new Map<string, CacheEntry<StarsPreview>>();
+const ownedReposCache = new Map<string, CacheEntry<GhOwnedRepo[]>>();
+
 export interface GhUser {
   login: string;
   name: string | null;
@@ -270,6 +292,11 @@ export async function fetchOwnedRepos(
 ): Promise<GhOwnedRepo[]> {
   const includeForks = opts.includeForks ?? false;
   const includePrivate = opts.includePrivate ?? true;
+  const cacheKey = `${token}\0f=${includeForks}&p=${includePrivate}`;
+
+  const hit = cached(ownedReposCache, cacheKey);
+  if (hit) return hit;
+
   const results: GhOwnedRepo[] = [];
   let page = 1;
   const perPage = 100;
@@ -312,6 +339,7 @@ export async function fetchOwnedRepos(
     if (page > 50) break;
   }
 
+  setCached(ownedReposCache, cacheKey, results);
   return results;
 }
 
@@ -330,6 +358,9 @@ export async function fetchStarsPreview(
 ): Promise<StarsPreview> {
   const t = token || getGithubToken();
   if (!t) throw new Error('No GitHub token configured');
+
+  const hit = cached(starsPreviewCache, t);
+  if (hit) return hit;
 
   const [user, stars, lists] = await Promise.all([
     validateGithubToken(t),
@@ -352,5 +383,7 @@ export async function fetchStarsPreview(
     .map((s) => s.full_name)
     .filter((n) => !listed.has(n));
 
-  return { user, stars, lists, membership, unlisted };
+  const result = { user, stars, lists, membership, unlisted };
+  setCached(starsPreviewCache, t, result);
+  return result;
 }
