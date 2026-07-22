@@ -34,9 +34,12 @@ export async function GET(
       sizeBytes: 0,
     }));
 
+    // Strip on-disk mirror path from the API surface (clone_url is intentional)
+    const { mirror_path: _mp, ...safeRepo } = repo;
+
     return NextResponse.json({
       repo: {
-        ...repo,
+        ...safeRepo,
         branch_count: stats.branchCount,
         tag_count: stats.tagCount,
         size_bytes: stats.sizeBytes,
@@ -103,10 +106,11 @@ export async function PATCH(
 
     updateRepo(id, { local_description });
     const updated = getRepoById(id)!;
+    const { mirror_path: _mp, ...safeRepo } = updated;
 
     return NextResponse.json({
       repo: {
-        ...updated,
+        ...safeRepo,
         lists: getRepoLists(updated.id),
       },
     });

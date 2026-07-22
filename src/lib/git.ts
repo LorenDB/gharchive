@@ -1,4 +1,4 @@
-import { exec as execCb } from 'child_process';
+import { execFile as execFileCb } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs';
@@ -9,15 +9,37 @@ import {
 } from '@/lib/user-context';
 import { hasEnoughMemory } from '@/lib/memory';
 
-const execAsync = promisify(execCb);
+const execFileAsync = promisify(execFileCb);
+
+const GIT_MAX_BUFFER = 10 * 1024 * 1024;
 
 function getMirrorsDir(): string {
   const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
   return path.join(dataDir, 'mirrors');
 }
 
-function run(cmd: string, cwd?: string): Promise<{ stdout: string; stderr: string }> {
-  return execAsync(cmd, { encoding: 'utf8', cwd, maxBuffer: 10 * 1024 * 1024 });
+/**
+ * Run git via execFile (no shell) so arguments cannot inject shell metacharacters.
+ */
+function runGit(
+  args: string[],
+  opts: { cwd?: string; maxBuffer?: number } = {}
+): Promise<{ stdout: string; stderr: string }> {
+  return execFileAsync('git', args, {
+    encoding: 'utf8',
+    cwd: opts.cwd,
+    maxBuffer: opts.maxBuffer ?? GIT_MAX_BUFFER,
+  }) as Promise<{ stdout: string; stderr: string }>;
+}
+
+function runGitBuffer(
+  args: string[],
+  opts: { maxBuffer?: number } = {}
+): Promise<{ stdout: Buffer; stderr: Buffer }> {
+  return execFileAsync('git', args, {
+    encoding: 'buffer',
+    maxBuffer: opts.maxBuffer ?? GIT_MAX_BUFFER,
+  }) as Promise<{ stdout: Buffer; stderr: Buffer }>;
 }
 
 function assertMemory(label: string): void {
@@ -128,7 +150,7 @@ export async function cloneMirror(
     );
     fs.mkdirSync(tmpDir, { recursive: true });
     try {
-      await run(`git clone --bare --mirror "${cloneUrl}" "${tmpDir}"`);
+      await runGit(['clone', '--bare', '--mirror', cloneUrl, tmpDir]);
       try {
         fs.renameSync(tmpDir, mirrorPath);
       } catch (renameErr: any) {
@@ -177,15 +199,15 @@ export async function withMirrorLock<T>(
 
 async function applyGcProtection(mirrorPath: string): Promise<void> {
   assertSafeGitArg(mirrorPath, 'mirror_path');
-  const settings = [
-    'gc.auto 0',
-    'gc.pruneExpire never',
-    'gc.reflogExpire never',
-    'gc.reflogExpireUnreachable never',
-    'core.logAllRefUpdates always',
+  const settings: [string, string][] = [
+    ['gc.auto', '0'],
+    ['gc.pruneExpire', 'never'],
+    ['gc.reflogExpire', 'never'],
+    ['gc.reflogExpireUnreachable', 'never'],
+    ['core.logAllRefUpdates', 'always'],
   ];
-  for (const setting of settings) {
-    await run(`git -C "${mirrorPath}" config ${setting}`);
+  for (const [key, value] of settings) {
+    await runGit(['-C', mirrorPath, 'config', key, value]);
   }
 }
 
@@ -220,7 +242,13 @@ export async function syncMirror(mirrorPath: string): Promise<MirrorSyncResult> 
     for (const ref of refList) {
       const shortRef = ref.replace(/^refs\//, '');
       try {
-        await run(`git -C "${mirrorPath}" update-ref "${snapshotNs}/${shortRef}" "${ref}"`);
+        await runGit([
+          '-C',
+          mirrorPath,
+          'update-ref',
+          `${snapshotNs}/${shortRef}`,
+          ref,
+        ]);
       } catch {
         // skip individual ref snapshot failures
       }
@@ -232,9 +260,13 @@ export async function syncMirror(mirrorPath: string): Promise<MirrorSyncResult> 
   let stdout = '';
   let stderr = '';
   try {
-    const result = await run(
-      `git -C "${mirrorPath}" fetch origin '+refs/*:refs/*'`
-    );
+    const result = await runGit([
+      '-C',
+      mirrorPath,
+      'fetch',
+      'origin',
+      '+refs/*:refs/*',
+    ]);
     stdout = result.stdout;
     stderr = result.stderr;
   } catch (err: any) {
@@ -267,9 +299,13 @@ async function listRefTips(
   prefix: string
 ): Promise<Record<string, string>> {
   try {
-    const { stdout } = await run(
-      `git -C "${mirrorPath}" for-each-ref --format='%(refname:short)%09%(objectname)' ${prefix}`
-    );
+    const { stdout } = await runGit([
+      '-C',
+      mirrorPath,
+      'for-each-ref',
+      '--format=%(refname:short)%09%(objectname)',
+      prefix,
+    ]);
     const out: Record<string, string> = {};
     for (const line of stdout.trim().split('\n').filter(Boolean)) {
       const [name, sha] = line.split('\t');
@@ -301,9 +337,14 @@ async function detectHistoryWipe(
     if (!newSha) continue;
     if (oldSha === newSha) continue;
     try {
-      await run(
-        `git -C "${mirrorPath}" merge-base --is-ancestor "${oldSha}" "${newSha}"`
-      );
+      await runGit([
+        '-C',
+        mirrorPath,
+        'merge-base',
+        '--is-ancestor',
+        oldSha,
+        newSha,
+      ]);
       // exit 0 → fast-forward / normal advance
     } catch {
       rewritten++;
@@ -390,14 +431,22 @@ export async function mirrorStat(mirrorPath: string): Promise<{
   sizeBytes: number;
 }> {
   try {
-    const { stdout: branches } = await run(
-      `git -C "${mirrorPath}" for-each-ref --format='%(refname)' refs/heads/`
-    );
+    const { stdout: branches } = await runGit([
+      '-C',
+      mirrorPath,
+      'for-each-ref',
+      '--format=%(refname)',
+      'refs/heads/',
+    ]);
     const branchCount = branches.trim().split('\n').filter(Boolean).length;
 
-    const { stdout: tags } = await run(
-      `git -C "${mirrorPath}" for-each-ref --format='%(refname)' refs/tags/`
-    );
+    const { stdout: tags } = await runGit([
+      '-C',
+      mirrorPath,
+      'for-each-ref',
+      '--format=%(refname)',
+      'refs/tags/',
+    ]);
     const tagCount = tags.trim().split('\n').filter(Boolean).length;
 
     const sizeBytes = dirSize(mirrorPath);
@@ -424,15 +473,24 @@ function dirSize(dirPath: string): number {
 
 export async function getDefaultBranch(mirrorPath: string): Promise<string> {
   try {
-    const { stdout } = await run(
-      `git -C "${mirrorPath}" symbolic-ref --short HEAD`
-    );
+    const { stdout } = await runGit([
+      '-C',
+      mirrorPath,
+      'symbolic-ref',
+      '--short',
+      'HEAD',
+    ]);
     return stdout.trim() || 'main';
   } catch {
     try {
-      const { stdout } = await run(
-        `git -C "${mirrorPath}" for-each-ref --format='%(refname:short)' --count=1 refs/heads/`
-      );
+      const { stdout } = await runGit([
+        '-C',
+        mirrorPath,
+        'for-each-ref',
+        '--format=%(refname:short)',
+        '--count=1',
+        'refs/heads/',
+      ]);
       return stdout.trim() || 'main';
     } catch {
       return 'main';
@@ -442,9 +500,14 @@ export async function getDefaultBranch(mirrorPath: string): Promise<string> {
 
 export async function listBranches(mirrorPath: string): Promise<string[]> {
   try {
-    const { stdout } = await run(
-      `git -C "${mirrorPath}" for-each-ref --format='%(refname:short)' --sort=-committerdate refs/heads/`
-    );
+    const { stdout } = await runGit([
+      '-C',
+      mirrorPath,
+      'for-each-ref',
+      '--format=%(refname:short)',
+      '--sort=-committerdate',
+      'refs/heads/',
+    ]);
     return stdout.trim().split('\n').filter(Boolean);
   } catch {
     return [];
@@ -453,9 +516,14 @@ export async function listBranches(mirrorPath: string): Promise<string[]> {
 
 export async function listTags(mirrorPath: string): Promise<string[]> {
   try {
-    const { stdout } = await run(
-      `git -C "${mirrorPath}" for-each-ref --format='%(refname:short)' --sort=-creatordate refs/tags/`
-    );
+    const { stdout } = await runGit([
+      '-C',
+      mirrorPath,
+      'for-each-ref',
+      '--format=%(refname:short)',
+      '--sort=-creatordate',
+      'refs/tags/',
+    ]);
     return stdout.trim().split('\n').filter(Boolean);
   } catch {
     return [];
@@ -470,10 +538,20 @@ export interface TreeEntry {
   size?: number;
 }
 
-/** Sanitize a ref or path segment used in git commands. */
-function assertSafeGitArg(value: string, label: string): string {
-  if (!value || /[\0\n\r;|&$`\\"' ]/.test(value) || value.includes('..')) {
-    throw new Error(`Invalid ${label}`);
+/**
+ * Sanitize a ref, path, or URL used as a git argv element.
+ * With execFile there is no shell, but we still block nulls, newlines,
+ * path traversal, and leading dashes (option injection).
+ */
+export function assertSafeGitArg(value: string, label: string): string {
+  if (!value || typeof value !== 'string') {
+    throw new Error(`Invalid ${label}: empty`);
+  }
+  if (/[\0\n\r]/.test(value)) {
+    throw new Error(`Invalid ${label}: control characters`);
+  }
+  if (value.includes('..')) {
+    throw new Error(`Invalid ${label}: path traversal`);
   }
   if (value.startsWith('-')) {
     throw new Error(`Invalid ${label}: starts with dash`);
@@ -491,9 +569,7 @@ export async function listTree(
     ? `${safeRef}:${assertSafeGitArg(dirPath.replace(/^\/+|\/+$/g, ''), 'path')}`
     : safeRef;
 
-  const { stdout } = await run(
-    `git -C "${mirrorPath}" ls-tree -l "${treeish}"`
-  );
+  const { stdout } = await runGit(['-C', mirrorPath, 'ls-tree', '-l', treeish]);
 
   const entries: TreeEntry[] = [];
   for (const line of stdout.trim().split('\n').filter(Boolean)) {
@@ -547,9 +623,13 @@ export async function getBlob(
   const safePath = assertSafeGitArg(normalized, 'path');
   const treeish = `${safeRef}:${safePath}`;
 
-  const { stdout: sizeStr } = await run(
-    `git -C "${mirrorPath}" cat-file -s "${treeish}"`
-  );
+  const { stdout: sizeStr } = await runGit([
+    '-C',
+    mirrorPath,
+    'cat-file',
+    '-s',
+    treeish,
+  ]);
   const size = parseInt(sizeStr.trim(), 10) || 0;
 
   if (size > MAX_TEXT_BYTES) {
@@ -562,9 +642,9 @@ export async function getBlob(
   }
 
   // Read raw bytes (binary-safe) via cat-file
-  const { stdout: buffer } = await execAsync(
-    `git -C "${mirrorPath}" cat-file -p "${treeish}"`,
-    { encoding: 'buffer', maxBuffer: MAX_TEXT_BYTES + 1024 }
+  const { stdout: buffer } = await runGitBuffer(
+    ['-C', mirrorPath, 'cat-file', '-p', treeish],
+    { maxBuffer: MAX_TEXT_BYTES + 1024 }
   );
 
   // Null-byte heuristic for binary
@@ -607,9 +687,13 @@ export async function getRawFile(
   const safePath = assertSafeGitArg(normalized, 'path');
   const treeish = `${safeRef}:${safePath}`;
 
-  const { stdout: sizeStr } = await run(
-    `git -C "${mirrorPath}" cat-file -s "${treeish}"`
-  );
+  const { stdout: sizeStr } = await runGit([
+    '-C',
+    mirrorPath,
+    'cat-file',
+    '-s',
+    treeish,
+  ]);
   const size = parseInt(sizeStr.trim(), 10) || 0;
 
   if (size > maxBytes) {
@@ -618,12 +702,12 @@ export async function getRawFile(
     );
   }
 
-  const { stdout: buffer } = await execAsync(
-    `git -C "${mirrorPath}" cat-file -p "${treeish}"`,
-    { encoding: 'buffer', maxBuffer: maxBytes + 1024 }
+  const { stdout: buffer } = await runGitBuffer(
+    ['-C', mirrorPath, 'cat-file', '-p', treeish],
+    { maxBuffer: maxBytes + 1024 }
   );
 
-  return { buffer: buffer as Buffer, size };
+  return { buffer, size };
 }
 
 /**
@@ -684,16 +768,36 @@ export function normalizeRepoRelativePath(
   return segments.join('/');
 }
 
+/**
+ * Extensions that must never be served as active content under our origin
+ * (XSS if a user navigates to /raw for a malicious repo file).
+ */
+const FORCE_DOWNLOAD_EXTS = new Set([
+  'html',
+  'htm',
+  'js',
+  'mjs',
+  'cjs',
+  'css',
+  'xml',
+  'xhtml',
+  'svg',
+]);
+
 /** Guess Content-Type from a repo file path. */
 export function contentTypeForPath(filePath: string): string {
   const ext = filePath.split('.').pop()?.toLowerCase() || '';
+  // Active / scriptable types: never serve as browsable HTML/JS under app origin
+  if (FORCE_DOWNLOAD_EXTS.has(ext)) {
+    if (ext === 'svg') return 'image/svg+xml';
+    return 'application/octet-stream';
+  }
   const map: Record<string, string> = {
     png: 'image/png',
     jpg: 'image/jpeg',
     jpeg: 'image/jpeg',
     gif: 'image/gif',
     webp: 'image/webp',
-    svg: 'image/svg+xml',
     ico: 'image/x-icon',
     bmp: 'image/bmp',
     avif: 'image/avif',
@@ -702,14 +806,16 @@ export function contentTypeForPath(filePath: string): string {
     txt: 'text/plain; charset=utf-8',
     md: 'text/markdown; charset=utf-8',
     json: 'application/json',
-    css: 'text/css; charset=utf-8',
-    js: 'text/javascript; charset=utf-8',
-    html: 'text/html; charset=utf-8',
-    htm: 'text/html; charset=utf-8',
     mp4: 'video/mp4',
     webm: 'video/webm',
   };
   return map[ext] || 'application/octet-stream';
+}
+
+/** Whether raw responses should force Content-Disposition: attachment. */
+export function shouldForceAttachment(filePath: string): boolean {
+  const ext = filePath.split('.').pop()?.toLowerCase() || '';
+  return FORCE_DOWNLOAD_EXTS.has(ext);
 }
 
 export async function getCommitInfo(
@@ -718,9 +824,14 @@ export async function getCommitInfo(
 ): Promise<{ sha: string; subject: string; author: string; date: string } | null> {
   try {
     const safeRef = assertSafeGitArg(ref, 'ref');
-    const { stdout } = await run(
-      `git -C "${mirrorPath}" log -1 --format='%H%x00%s%x00%an%x00%cI' "${safeRef}"`
-    );
+    const { stdout } = await runGit([
+      '-C',
+      mirrorPath,
+      'log',
+      '-1',
+      '--format=%H%x00%s%x00%an%x00%cI',
+      safeRef,
+    ]);
     const [sha, subject, author, date] = stdout.trim().split('\0');
     if (!sha) return null;
     return { sha, subject, author, date };

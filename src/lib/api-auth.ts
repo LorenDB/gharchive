@@ -5,7 +5,6 @@ import {
   type SessionUser,
 } from '@/lib/auth';
 import { AUTOLOGIN_USER_ID, runAsUserAsync } from '@/lib/user-context';
-import { createHash } from 'crypto';
 
 const AUTOLOGIN_USER: SessionUser = {
   id: AUTOLOGIN_USER_ID,
@@ -25,12 +24,16 @@ interface RateLimitBucket {
 
 const rateLimitBuckets = new Map<string, RateLimitBucket>();
 
-function rateLimitKey(req: NextRequest, limit: { windowMs: number }): string {
-  const ip =
-    req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-    req.headers.get('x-real-ip') ||
-    'unknown';
-  return `ratelimit\0${ip}\0${req.nextUrl.pathname}`;
+function clientIp(req: NextRequest): string {
+  // Prefer right-most / last proxy hop only when a trusted proxy sets these.
+  // Take the first XFF entry (client as seen by the edge proxy).
+  const xff = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
+  if (xff) return xff;
+  return req.headers.get('x-real-ip')?.trim() || 'unknown';
+}
+
+function rateLimitKey(req: NextRequest): string {
+  return `ratelimit\0${clientIp(req)}\0${req.nextUrl.pathname}`;
 }
 
 export function checkRateLimit(
@@ -39,7 +42,7 @@ export function checkRateLimit(
 ): NextResponse | null {
   const maxRequests = opts.maxRequests ?? 100;
   const windowMs = opts.windowMs ?? 60_000;
-  const key = rateLimitKey(req, { windowMs });
+  const key = rateLimitKey(req);
   const now = Date.now();
 
   const bucket = rateLimitBuckets.get(key);
@@ -52,7 +55,12 @@ export function checkRateLimit(
   if (bucket.count > maxRequests) {
     return NextResponse.json(
       { error: 'Too many requests' },
-      { status: 429, headers: { 'Retry-After': String(Math.ceil((bucket.resetAt - now) / 1000)) } }
+      {
+        status: 429,
+        headers: {
+          'Retry-After': String(Math.ceil((bucket.resetAt - now) / 1000)),
+        },
+      }
     );
   }
   return null;
@@ -72,44 +80,65 @@ if (typeof setInterval !== 'undefined') {
 
 const CSRF_SENSITIVE_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'];
 
+function configuredAppOrigin(): string {
+  return (
+    process.env.APP_URL ||
+    process.env.NEXTAUTH_URL ||
+    process.env.AUTH_URL ||
+    ''
+  ).replace(/\/$/, '');
+}
+
+function hostFromUrlHeader(header: string): string | null {
+  try {
+    return new URL(header).host;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Origin/Referer check for cookie-authenticated mutating requests.
+ *
+ * Only trusts the configured APP_URL host — never Host / X-Forwarded-Host
+ * from the request (those are attacker-controlled without a trusted proxy).
+ * When APP_URL is set, Origin or Referer is required and must match.
+ */
 export function checkCsrf(req: NextRequest): NextResponse | null {
   if (!CSRF_SENSITIVE_METHODS.includes(req.method)) return null;
 
-  const origin = req.headers.get('origin');
-  const referer = req.headers.get('referer');
-  const host = req.headers.get('host') || '';
-  const xForwardedHost = req.headers.get('x-forwarded-host') || '';
-
-  const appOrigin = (
-    process.env.APP_URL ||
-    process.env.NEXTAUTH_URL ||
-    ''
-  ).replace(/\/$/, '');
-
-  if (appOrigin) {
-    try {
-      const appHost = new URL(appOrigin).host;
-      for (const header of [origin, referer]) {
-        if (!header) continue;
-        try {
-          const headerHost = new URL(header).host;
-          if (headerHost === appHost || headerHost === host || headerHost === xForwardedHost) {
-            return null;
-          }
-        } catch {}
-      }
-      // If APP_URL is set and neither origin nor referer match, reject
-      if (origin || referer) {
-        return NextResponse.json(
-          { error: 'CSRF check failed' },
-          { status: 403 }
-        );
-      }
-    } catch {}
+  const appOrigin = configuredAppOrigin();
+  if (!appOrigin) {
+    // No configured origin — rely on SameSite=Lax cookies only (dev / misconfig)
+    return null;
   }
 
-  // No configured APP_URL — rely on sameSite cookies only
-  return null;
+  let appHost: string;
+  try {
+    appHost = new URL(appOrigin).host;
+  } catch {
+    return null;
+  }
+
+  const origin = req.headers.get('origin');
+  const referer = req.headers.get('referer');
+
+  if (!origin && !referer) {
+    return NextResponse.json(
+      { error: 'CSRF check failed: missing Origin/Referer' },
+      { status: 403 }
+    );
+  }
+
+  for (const header of [origin, referer]) {
+    if (!header) continue;
+    const headerHost = hostFromUrlHeader(header);
+    if (headerHost && headerHost === appHost) {
+      return null;
+    }
+  }
+
+  return NextResponse.json({ error: 'CSRF check failed' }, { status: 403 });
 }
 // ── User resolution ─────────────────────────────────────────────
 

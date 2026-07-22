@@ -3,8 +3,10 @@ import { describe, expect, it } from 'vitest';
 import {
   normalizeRepoRelativePath,
   contentTypeForPath,
+  shouldForceAttachment,
   isRemoteMissingError,
   getMirrorPath,
+  assertSafeGitArg,
 } from '@/lib/git';
 
 describe('normalizeRepoRelativePath', () => {
@@ -75,13 +77,36 @@ describe('contentTypeForPath', () => {
     expect(contentTypeForPath('photo.bmp')).toBe('image/bmp');
   });
 
+  it('forces attachment for scriptable extensions', () => {
+    expect(shouldForceAttachment('x.html')).toBe(true);
+    expect(shouldForceAttachment('x.svg')).toBe(true);
+    expect(shouldForceAttachment('x.js')).toBe(true);
+    expect(shouldForceAttachment('photo.png')).toBe(false);
+  });
+
+  it('assertSafeGitArg blocks control chars and option injection', () => {
+    expect(() => assertSafeGitArg('-evil', 'ref')).toThrow(/dash/);
+    expect(() => assertSafeGitArg('a\nb', 'ref')).toThrow(/control/);
+    expect(() => assertSafeGitArg('foo/../bar', 'path')).toThrow(/traversal/);
+    expect(assertSafeGitArg('main', 'ref')).toBe('main');
+    expect(assertSafeGitArg('path with spaces/file.txt', 'path')).toBe(
+      'path with spaces/file.txt'
+    );
+  });
+
   it('returns text types with charset', () => {
     expect(contentTypeForPath('readme.txt')).toBe('text/plain; charset=utf-8');
     expect(contentTypeForPath('readme.md')).toBe('text/markdown; charset=utf-8');
-    expect(contentTypeForPath('styles.css')).toBe('text/css; charset=utf-8');
-    expect(contentTypeForPath('app.js')).toBe('text/javascript; charset=utf-8');
-    expect(contentTypeForPath('page.html')).toBe('text/html; charset=utf-8');
-    expect(contentTypeForPath('page.htm')).toBe('text/html; charset=utf-8');
+  });
+
+  it('never serves active content as browsable HTML/JS/CSS', () => {
+    // XSS mitigation: HTML/JS/CSS forced to octet-stream
+    expect(contentTypeForPath('styles.css')).toBe('application/octet-stream');
+    expect(contentTypeForPath('app.js')).toBe('application/octet-stream');
+    expect(contentTypeForPath('page.html')).toBe('application/octet-stream');
+    expect(contentTypeForPath('page.htm')).toBe('application/octet-stream');
+    // SVG keeps image type for <img> embedding but shouldForceAttachment
+    expect(contentTypeForPath('icon.svg')).toBe('image/svg+xml');
   });
 
   it('returns application types', () => {
@@ -105,7 +130,8 @@ describe('contentTypeForPath', () => {
   });
 
   it('handles nested paths', () => {
-    expect(contentTypeForPath('a/b/c/styles.css')).toBe('text/css; charset=utf-8');
+    expect(contentTypeForPath('a/b/c/photo.png')).toBe('image/png');
+    expect(contentTypeForPath('a/b/c/styles.css')).toBe('application/octet-stream');
   });
 });
 

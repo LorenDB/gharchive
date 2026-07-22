@@ -243,7 +243,9 @@ export async function PUT(req: NextRequest) {
         }
       }
 
-      if (body.apprise_api_url !== undefined) {
+      // apprise_api_url is admin-only: it controls where the server POSTs
+      // (SSRF surface). Non-admins use APPRISE_API_URL env or admin-set base.
+      if (body.apprise_api_url !== undefined && userIsAdmin) {
         if (typeof body.apprise_api_url !== 'string') {
           return NextResponse.json(
             { error: 'apprise_api_url must be a string' },

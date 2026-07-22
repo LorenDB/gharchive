@@ -7,6 +7,7 @@ import {
 } from '@/lib/user-context';
 import { hasEnoughMemory } from '@/lib/memory';
 import { assertSafePathSegment } from '@/lib/git';
+import { parseTrustedAssetUrl } from '@/lib/safe-url';
 
 function getReleasesDir(): string {
   const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
@@ -26,6 +27,43 @@ export interface AssetData {
   content_type: string;
   size: number;
   download_url: string;
+}
+
+function finalizeCloneIdentity(
+  platform: 'github' | 'gitlab',
+  repoPath: string
+): {
+  platform: 'github' | 'gitlab';
+  owner: string;
+  repo: string;
+  projectPath: string;
+} {
+  const parts = repoPath
+    .split('/')
+    .filter(Boolean)
+    .map((p) => p.replace(/\.git$/, ''));
+  if (parts.length < 2) throw new Error('Invalid repo URL');
+  // GitHub is always owner/name (optionally with extra noise we reject)
+  if (platform === 'github' && parts.length !== 2) {
+    throw new Error('Invalid repo URL');
+  }
+  // GitLab may have nested groups — first segment owner, last segment name for
+  // on-disk layout; projectPath keeps the full path for API calls.
+  const ownerSeg = parts[0]!;
+  const nameSeg = parts[parts.length - 1]!;
+  assertSafePathSegment(ownerSeg, 'owner');
+  assertSafePathSegment(nameSeg, 'repo');
+  for (const p of parts) {
+    if (p === '.' || p === '..' || !p) {
+      throw new Error('Invalid repo URL');
+    }
+  }
+  return {
+    platform,
+    owner: ownerSeg,
+    repo: nameSeg,
+    projectPath: parts.join('/'),
+  };
 }
 
 export function parseCloneUrl(url: string): {
@@ -48,33 +86,31 @@ export function parseCloneUrl(url: string): {
     const host = sshMatch[1];
     const repoPath = sshMatch[2];
     if (host === 'github.com') {
-      const [owner, ...rest] = repoPath.split('/');
-      return { platform: 'github', owner, repo: rest.join('/'), projectPath: repoPath };
+      return finalizeCloneIdentity('github', repoPath);
     }
     if (host === 'gitlab.com') {
-      const [owner, ...rest] = repoPath.split('/');
-      return { platform: 'gitlab', owner, repo: rest.join('/'), projectPath: repoPath };
+      return finalizeCloneIdentity('gitlab', repoPath);
     }
   }
 
-  const httpsMatch = cleaned.match(/^https?:\/\/([^/]+)\/(.+)$/);
+  const httpsMatch = cleaned.match(/^https:\/\/([^/]+)\/(.+)$/);
   if (httpsMatch) {
     const host = httpsMatch[1].replace(/^www\./, '');
     const repoPath = httpsMatch[2];
+    // Reject userinfo smuggled into host
+    if (host.includes('@')) {
+      throw new Error('Invalid repository URL');
+    }
     if (host === 'github.com') {
-      const [owner, ...rest] = repoPath.split('/');
-      if (!owner || rest.length === 0) throw new Error('Invalid repo URL');
-      return { platform: 'github', owner, repo: rest.join('/'), projectPath: repoPath };
+      return finalizeCloneIdentity('github', repoPath);
     }
     if (host === 'gitlab.com') {
-      const [owner, ...rest] = repoPath.split('/');
-      if (!owner || rest.length === 0) throw new Error('Invalid repo URL');
-      return { platform: 'gitlab', owner, repo: rest.join('/'), projectPath: repoPath };
+      return finalizeCloneIdentity('gitlab', repoPath);
     }
   }
 
   throw new Error(
-    `Unsupported repository URL: ${url}. Only github.com and gitlab.com are supported.`
+    `Unsupported repository URL: ${url}. Only github.com and gitlab.com (https or SSH) are supported.`
   );
 }
 
@@ -155,6 +191,12 @@ export async function downloadReleaseAsset(
   destPath: string
 ): Promise<boolean> {
   try {
+    const trusted = parseTrustedAssetUrl(url);
+    if (!trusted) {
+      console.warn(`[releases] refusing untrusted asset URL: ${url.slice(0, 120)}`);
+      return false;
+    }
+
     const memCheck = hasEnoughMemory(64);
     if (!memCheck.ok) {
       console.warn(`[releases] skipping asset download (${memCheck.reason}): ${url}`);
@@ -168,8 +210,31 @@ export async function downloadReleaseAsset(
     const headers: Record<string, string> = { 'User-Agent': 'gharchive' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
-    const res = await fetch(url, { headers });
-    if (!res.ok) return false;
+    // Manual redirect follow so we re-validate host on every hop (SSRF).
+    let current = trusted;
+    let res: Response | null = null;
+    for (let hop = 0; hop < 5; hop++) {
+      res = await fetch(current.toString(), {
+        headers,
+        redirect: 'manual',
+        signal: AbortSignal.timeout(120_000),
+      });
+      if (res.status >= 300 && res.status < 400) {
+        const loc = res.headers.get('location');
+        if (!loc) return false;
+        const next = parseTrustedAssetUrl(new URL(loc, current).toString());
+        if (!next) {
+          console.warn(
+            `[releases] asset redirect to untrusted host blocked: ${loc.slice(0, 120)}`
+          );
+          return false;
+        }
+        current = next;
+        continue;
+      }
+      break;
+    }
+    if (!res || !res.ok) return false;
 
     const buffer = Buffer.from(await res.arrayBuffer());
     fs.writeFileSync(destPath, buffer);

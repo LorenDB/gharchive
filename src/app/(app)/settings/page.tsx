@@ -1088,10 +1088,19 @@ export default function SettingsPage() {
                 }
                 placeholder="http://apprise:8000"
                 autoComplete="off"
+                disabled={!isAdmin}
+                readOnly={!isAdmin}
               />
               <p className="hint">
                 Base URL of your Apprise API container (no trailing path). Example:{' '}
                 <span className="font-mono">http://apprise:8000</span>
+                {!isAdmin && (
+                  <>
+                    {' '}
+                    (admin-only — set via env{' '}
+                    <span className="font-mono">APPRISE_API_URL</span> or an admin.)
+                  </>
+                )}
               </p>
             </div>
 

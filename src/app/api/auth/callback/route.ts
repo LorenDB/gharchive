@@ -22,14 +22,31 @@ import {
 } from '@/lib/session';
 import { ensureAppUser } from '@/lib/db';
 
+/** Same-origin relative path only (no protocol-relative or scheme smuggling). */
 function safeReturnTo(path: string | null | undefined): string {
-  if (!path || !path.startsWith('/') || path.startsWith('//')) return '/';
+  if (!path || typeof path !== 'string') return '/';
+  if (!path.startsWith('/') || path.startsWith('//') || path.startsWith('/\\')) {
+    return '/';
+  }
+  if (/[\0\r\n\\]/.test(path)) return '/';
+  if (path.length > 512) return '/';
   return path;
 }
 
-function redirectLoginError(message: string) {
+/** User-facing error only — never leak token exchange / internal details. */
+function redirectLoginError(message: string, logDetail?: unknown) {
+  if (logDetail !== undefined) {
+    console.error('[auth/callback]', message, logDetail);
+  } else {
+    console.error('[auth/callback]', message);
+  }
   const url = new URL(appUrl('/login'));
-  url.searchParams.set('error', message);
+  // Cap and sanitize so IdP error_description cannot inject into UI/logs loosely
+  const safe =
+    typeof message === 'string' && message.length > 0
+      ? message.replace(/[\r\n]/g, ' ').slice(0, 200)
+      : 'Authentication failed';
+  url.searchParams.set('error', safe);
   const res = NextResponse.redirect(url.toString());
   res.cookies.set(OAUTH_COOKIE, '', clearCookieOptions());
   return res;
@@ -47,9 +64,12 @@ export async function GET(req: NextRequest) {
 
   const error = req.nextUrl.searchParams.get('error');
   if (error) {
-    const desc =
-      req.nextUrl.searchParams.get('error_description') || error;
-    return redirectLoginError(desc);
+    // Prefer stable short codes; do not echo full IdP error_description (info leak)
+    const desc = req.nextUrl.searchParams.get('error_description');
+    if (desc) console.error('[auth/callback] IdP error:', error, desc.slice(0, 300));
+    return redirectLoginError(
+      error === 'access_denied' ? 'Access denied' : 'Sign-in was cancelled or failed'
+    );
   }
 
   const code = req.nextUrl.searchParams.get('code');
@@ -95,7 +115,15 @@ export async function GET(req: NextRequest) {
 
     const groups = claims?.groups ?? [];
     const adminGroup = getAdminGroup();
-    const isAdmin = adminGroup ? groups.includes(adminGroup) : true;
+    // Require explicit OIDC_ADMIN_GROUP membership for admin — never default
+    // every SSO user to admin (privilege escalation in multi-user deploys).
+    const isAdmin = Boolean(adminGroup && groups.includes(adminGroup));
+    if (!adminGroup) {
+      console.warn(
+        '[auth/callback] OIDC_ADMIN_GROUP is not set; all users get role=user. ' +
+          'Set OIDC_ADMIN_GROUP to grant admin via IdP group membership.'
+      );
+    }
 
     const user: SessionUser = {
       id: claims.sub,
@@ -123,7 +151,6 @@ export async function GET(req: NextRequest) {
     return res;
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'OIDC callback failed';
-    console.error('[auth/callback]', message);
-    return redirectLoginError(message);
+    return redirectLoginError('Sign-in failed. Please try again.', message);
   }
 }

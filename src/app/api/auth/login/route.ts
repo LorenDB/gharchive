@@ -15,8 +15,17 @@ import {
   sessionCookieOptions,
 } from '@/lib/session';
 
+/** Same-origin relative path only (no protocol-relative or scheme smuggling). */
 function safeReturnTo(path: string | null): string {
-  if (!path || !path.startsWith('/') || path.startsWith('//')) return '/';
+  if (!path || typeof path !== 'string') return '/';
+  // Must be a single relative path: /foo, not //evil, /\\evil, http:…
+  if (!path.startsWith('/') || path.startsWith('//') || path.startsWith('/\\')) {
+    return '/';
+  }
+  if (/[\0\r\n\\]/.test(path)) return '/';
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(path.slice(1))) return '/';
+  // Cap length; strip query fragments that try open-redirect tricks
+  if (path.length > 512) return '/';
   return path;
 }
 
