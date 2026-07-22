@@ -35,6 +35,7 @@ interface Settings {
   alert_memory_low: boolean;
   storage_alert_threshold_percent: number;
   storage_alert_min_free_mb: number;
+  global_max_asset_size_mb: number;
 }
 
 interface SchedulerStatus {
@@ -160,6 +161,7 @@ export default function SettingsPage() {
   const [alertsConfigured, setAlertsConfigured] = useState(false);
   const [testBusy, setTestBusy] = useState(false);
   const [appriseUrlsText, setAppriseUrlsText] = useState('');
+  const [isAdmin, setIsAdmin] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -175,6 +177,7 @@ export default function SettingsPage() {
       setScheduler(data.scheduler);
       setDisk(data.disk || null);
       setAlertsConfigured(Boolean(data.alerts?.configured));
+      setIsAdmin(Boolean(data.is_admin));
       if (ghRes.ok) {
         const gh = await ghRes.json();
         setGhAccount(gh.account);
@@ -268,6 +271,7 @@ export default function SettingsPage() {
       setAppriseUrlsText((data.settings?.apprise_urls || []).join('\n'));
       setScheduler(data.scheduler);
       setAlertsConfigured(Boolean(data.alerts?.configured));
+      setIsAdmin(Boolean(data.is_admin));
       setMessage({ type: 'ok', text: 'Settings saved' });
     } catch (err: any) {
       setMessage({ type: 'err', text: err.message });
@@ -301,6 +305,7 @@ export default function SettingsPage() {
         setAppriseUrlsText((saveData.settings?.apprise_urls || []).join('\n'));
         setScheduler(saveData.scheduler);
         setAlertsConfigured(Boolean(saveData.alerts?.configured));
+        setIsAdmin(Boolean(saveData.is_admin));
       }
 
       const res = await fetch('/api/alerts/test', {
@@ -786,26 +791,35 @@ export default function SettingsPage() {
               <label className="label" htmlFor="concurrent">
                 Concurrent syncs
               </label>
-              <select
-                id="concurrent"
-                className="input max-w-[12rem]"
-                value={draft.concurrent_syncs}
-                onChange={(e) =>
-                  setDraft({
-                    ...draft,
-                    concurrent_syncs: parseInt(e.target.value, 10),
-                  })
-                }
-              >
-                {[1, 2, 3, 4].map((n) => (
-                  <option key={n} value={n}>
-                    {n} at a time
-                  </option>
-                ))}
-              </select>
-              <p className="hint">
-                Higher values finish large archives faster but use more disk and network.
-              </p>
+              {isAdmin ? (
+                <>
+                  <select
+                    id="concurrent"
+                    className="input max-w-[12rem]"
+                    value={draft.concurrent_syncs}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        concurrent_syncs: parseInt(e.target.value, 10),
+                      })
+                    }
+                  >
+                    {[1, 2, 3, 4].map((n) => (
+                      <option key={n} value={n}>
+                        {n} at a time
+                      </option>
+                    ))}
+                  </select>
+                  <p className="hint">
+                    Higher values finish large archives faster but use more disk and network.
+                  </p>
+                </>
+              ) : (
+                <p className="text-sm text-ink-500 font-mono">
+                  {draft.concurrent_syncs} at a time{' '}
+                  <span className="text-ink-600">(set by admin)</span>
+                </p>
+              )}
             </div>
           </div>
         </section>
@@ -836,6 +850,33 @@ export default function SettingsPage() {
               draft.download_release_assets ? '' : 'opacity-40 pointer-events-none'
             }
           >
+            {isAdmin && (
+              <div className="mb-5">
+                <label className="label" htmlFor="global-max-asset">
+                  Global max asset size (MB)
+                </label>
+                <input
+                  id="global-max-asset"
+                  type="number"
+                  min={0}
+                  className="input max-w-[12rem]"
+                  value={draft.global_max_asset_size_mb}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      global_max_asset_size_mb: Math.max(
+                        0,
+                        parseInt(e.target.value || '0', 10)
+                      ),
+                    })
+                  }
+                />
+                <p className="hint">
+                  Upper bound for all users&rsquo; per-user asset size limits.{' '}
+                  <span className="font-mono">0</span> = no global limit.
+                </p>
+              </div>
+            )}
             <label className="label" htmlFor="max-asset">
               Max asset size (MB)
             </label>
@@ -853,14 +894,22 @@ export default function SettingsPage() {
               }
             />
             <p className="hint">
-              Assets larger than this are skipped. Use <span className="font-mono">0</span>{' '}
+              Assets larger than this are skipped. Use{' '}
+              <span className="font-mono">0</span>{' '}
               for no limit.
+              {draft.global_max_asset_size_mb > 0 && (
+                <>
+                  {' '}Global cap:{' '}
+                  <span className="font-mono">{draft.global_max_asset_size_mb} MB</span>
+                </>
+              )}
             </p>
           </div>
         </section>
 
-        {/* Memory awareness */}
-        <section className="surface p-5 sm:p-6">
+        {/* Memory awareness — admin only */}
+        {isAdmin && (
+          <section className="surface p-5 sm:p-6">
           <div className="flex items-start justify-between gap-4 mb-5">
             <div>
               <h2 className="text-base font-semibold text-white">Memory limits</h2>
@@ -984,6 +1033,7 @@ export default function SettingsPage() {
             )}
           </div>
         </section>
+        )}
 
         {/* Alerts / Apprise */}
         <section className="surface p-5 sm:p-6">
@@ -1139,6 +1189,7 @@ export default function SettingsPage() {
               </div>
             </div>
 
+            {isAdmin && (
             <div>
               <p className="label mb-2">System events</p>
               <div className="rounded-lg border border-ink-800 bg-ink-950/40 divide-y divide-ink-800/80">
@@ -1163,7 +1214,9 @@ export default function SettingsPage() {
                 ))}
               </div>
             </div>
+            )}
 
+            {isAdmin && (
             <div
               className={`space-y-4 ${
                 draft.alert_storage_low ? '' : 'opacity-40 pointer-events-none'
@@ -1248,6 +1301,7 @@ export default function SettingsPage() {
                 </div>
               )}
             </div>
+            )}
 
             <div className="flex flex-wrap items-center gap-3 pt-1">
               <button

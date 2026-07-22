@@ -63,6 +63,7 @@ describe('createSessionToken / readSessionToken', () => {
     email: 'test@example.com',
     name: 'Test User',
     role: 'admin' as const,
+    groups: [] as string[],
   };
 
   it('round-trips a session token', async () => {

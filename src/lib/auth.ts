@@ -24,6 +24,7 @@ const AUTOLOGIN_USER: SessionUser = {
   email: null,
   name: 'Admin (autologin)',
   role: 'admin',
+  groups: [],
 };
 
 export { isOidcConfigured };
@@ -54,6 +55,10 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
 export async function getCurrentUserId(): Promise<string | null> {
   const user = await getCurrentUser();
   return user?.id ?? null;
+}
+
+export function isAdmin(user: SessionUser): boolean {
+  return user.role === 'admin';
 }
 
 /**
@@ -97,6 +102,7 @@ export function publicUser(user: SessionUser | null) {
     email: user.email,
     name: user.name,
     role: user.role,
+    is_admin: isAdmin(user),
   };
 }
 

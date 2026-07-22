@@ -87,6 +87,9 @@ export interface Settings {
   storage_alert_threshold_percent: number;
   /** Free disk MB below which storage_low fires */
   storage_alert_min_free_mb: number;
+
+  /** Admin-set global upper bound for max_asset_size_mb. 0 = no limit. */
+  global_max_asset_size_mb: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -123,6 +126,8 @@ export const DEFAULT_SETTINGS: Settings = {
 
   storage_alert_threshold_percent: 90,
   storage_alert_min_free_mb: 1024,
+
+  global_max_asset_size_mb: 0,
 };
 
 export interface GithubAccount {

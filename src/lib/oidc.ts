@@ -38,6 +38,7 @@ export interface OidcClaims {
   given_name?: string;
   family_name?: string;
   nickname?: string;
+  groups?: string[];
 }
 
 let metadataCache: { issuer: string; meta: OidcMetadata; fetchedAt: number } | null =
@@ -205,6 +206,10 @@ export function decodeJwtPayload(jwt: string): OidcClaims | null {
   } catch {
     return null;
   }
+}
+
+export function getAdminGroup(): string | null {
+  return process.env.OIDC_ADMIN_GROUP?.trim() || null;
 }
 
 export function claimsToUsername(claims: OidcClaims): string {

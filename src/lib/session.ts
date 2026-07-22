@@ -11,7 +11,8 @@ export interface SessionUser {
   username: string;
   email: string | null;
   name: string | null;
-  role: 'admin';
+  role: 'admin' | 'user';
+  groups: string[];
 }
 
 export interface SessionPayload {

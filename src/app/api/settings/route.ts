@@ -13,6 +13,7 @@ import {
 } from '@/lib/scheduler';
 import { withApiUser } from '@/lib/api-auth';
 import { getRequiredUserId } from '@/lib/user-context';
+import { isAdmin } from '@/lib/auth';
 import {
   ALERT_CATEGORIES,
   ALERT_CATEGORY_META,
@@ -78,7 +79,7 @@ function parseAppriseUrls(value: unknown): string[] | { error: string } {
 }
 
 export async function GET() {
-  return withApiUser(async () => {
+  return withApiUser(async (user) => {
     const settings = getSettings();
     let disk = null;
     try {
@@ -99,15 +100,17 @@ export async function GET() {
         })),
       },
       disk,
+      is_admin: isAdmin(user),
     });
   });
 }
 
 export async function PUT(req: NextRequest) {
-  return withApiUser(async () => {
+  return withApiUser(async (user) => {
     try {
       const body = await req.json();
       const patch: Partial<Settings> = {};
+      const userIsAdmin = isAdmin(user);
 
       if (typeof body.auto_sync_enabled === 'boolean') {
         patch.auto_sync_enabled = body.auto_sync_enabled;
@@ -133,10 +136,15 @@ export async function PUT(req: NextRequest) {
             { status: 400 }
           );
         }
-        patch.max_asset_size_mb = Math.round(n);
+        let val = Math.round(n);
+        const settings = getSettings();
+        if (settings.global_max_asset_size_mb > 0 && val > settings.global_max_asset_size_mb) {
+          val = settings.global_max_asset_size_mb;
+        }
+        patch.max_asset_size_mb = val;
       }
 
-      if (body.concurrent_syncs !== undefined) {
+      if (body.concurrent_syncs !== undefined && userIsAdmin) {
         const n = Number(body.concurrent_syncs);
         if (!Number.isFinite(n) || n < 1 || n > 8) {
           return NextResponse.json(
@@ -145,6 +153,17 @@ export async function PUT(req: NextRequest) {
           );
         }
         patch.concurrent_syncs = Math.round(n);
+      }
+
+      if (body.global_max_asset_size_mb !== undefined && userIsAdmin) {
+        const n = Number(body.global_max_asset_size_mb);
+        if (!Number.isFinite(n) || n < 0 || n > 100_000) {
+          return NextResponse.json(
+            { error: 'global_max_asset_size_mb must be between 0 and 100000' },
+            { status: 400 }
+          );
+        }
+        patch.global_max_asset_size_mb = Math.round(n);
       }
 
       // GitHub scan / auto-import
@@ -180,12 +199,12 @@ export async function PUT(req: NextRequest) {
         patch.github_scan_interval_hours = n;
       }
 
-      // Memory-aware settings
-      if (typeof body.memory_aware_enabled === 'boolean') {
+      // Memory-aware settings (admin only)
+      if (typeof body.memory_aware_enabled === 'boolean' && userIsAdmin) {
         patch.memory_aware_enabled = body.memory_aware_enabled;
       }
 
-      if (body.min_free_memory_mb !== undefined) {
+      if (body.min_free_memory_mb !== undefined && userIsAdmin) {
         const n = Number(body.min_free_memory_mb);
         if (!Number.isFinite(n) || n < 64 || n > 65536) {
           return NextResponse.json(
@@ -196,7 +215,7 @@ export async function PUT(req: NextRequest) {
         patch.min_free_memory_mb = Math.round(n);
       }
 
-      if (body.max_memory_usage_ratio !== undefined) {
+      if (body.max_memory_usage_ratio !== undefined && userIsAdmin) {
         const n = Number(body.max_memory_usage_ratio);
         if (!Number.isFinite(n) || n < 0.1 || n > 1) {
           return NextResponse.json(
@@ -208,8 +227,13 @@ export async function PUT(req: NextRequest) {
       }
 
       // Alerts / Apprise
+      // Archive event alert booleans are available to everyone
       for (const key of ALERT_BOOL_KEYS) {
         if (typeof body[key] === 'boolean') {
+          // System event alerts are admin-only; silently skip for non-admins
+          if ((key === 'alert_storage_low' || key === 'alert_memory_low') && !userIsAdmin) {
+            continue;
+          }
           patch[key] = body[key];
         }
       }
@@ -265,7 +289,7 @@ export async function PUT(req: NextRequest) {
         patch.apprise_urls = urls;
       }
 
-      if (body.storage_alert_threshold_percent !== undefined) {
+      if (body.storage_alert_threshold_percent !== undefined && userIsAdmin) {
         const n = Number(body.storage_alert_threshold_percent);
         if (!Number.isFinite(n) || n < 50 || n > 100) {
           return NextResponse.json(
@@ -279,7 +303,7 @@ export async function PUT(req: NextRequest) {
         patch.storage_alert_threshold_percent = Math.round(n);
       }
 
-      if (body.storage_alert_min_free_mb !== undefined) {
+      if (body.storage_alert_min_free_mb !== undefined && userIsAdmin) {
         const n = Number(body.storage_alert_min_free_mb);
         if (!Number.isFinite(n) || n < 0 || n > 1024 * 1024) {
           return NextResponse.json(
@@ -301,6 +325,7 @@ export async function PUT(req: NextRequest) {
             ...ALERT_CATEGORY_META[id as AlertCategory],
           })),
         },
+        is_admin: userIsAdmin,
       });
     } catch (err: any) {
       return NextResponse.json({ error: err.message }, { status: 400 });

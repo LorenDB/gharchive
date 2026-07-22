@@ -7,6 +7,7 @@ import {
   fetchOidcMetadata,
   fetchUserInfo,
   getOidcConfig,
+  getAdminGroup,
   isOidcConfigured,
   type OidcClaims,
 } from '@/lib/oidc';
@@ -89,12 +90,17 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    const groups = claims?.groups ?? [];
+    const adminGroup = getAdminGroup();
+    const isAdmin = adminGroup ? groups.includes(adminGroup) : true;
+
     const user: SessionUser = {
       id: claims.sub,
       username: claimsToUsername(claims),
       email: claims.email ?? null,
       name: claims.name ?? null,
-      role: 'admin',
+      role: isAdmin ? 'admin' : 'user',
+      groups,
     };
 
     // Register user; first SSO login claims legacy no-auth admin data

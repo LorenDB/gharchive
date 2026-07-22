@@ -12,6 +12,7 @@ const AUTOLOGIN_USER: SessionUser = {
   email: null,
   name: 'Admin (autologin)',
   role: 'admin',
+  groups: [],
 };
 
 /**
