@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
-import { formatBytes, formatDate } from '@/lib/format';
+import { formatBytes, formatDate, formatDiskSize } from '@/lib/format';
 
 interface Settings {
   auto_sync_enabled: boolean;
@@ -1860,18 +1860,18 @@ export default function SettingsClient({
                           <span className="text-ink-500">Used</span>
                           <br />
                           <span className="font-mono tabular-nums">
-                            {disk.usedMB} MB ({Math.round(disk.usageRatio * 100)}%)
+                             {formatDiskSize(disk.usedMB)} ({Math.round(disk.usageRatio * 100)}%)
                           </span>
                         </div>
                         <div>
                           <span className="text-ink-500">Free</span>
                           <br />
-                          <span className="font-mono tabular-nums">{disk.freeMB} MB</span>
+                          <span className="font-mono tabular-nums">{formatDiskSize(disk.freeMB)}</span>
                         </div>
                         <div>
                           <span className="text-ink-500">Total</span>
                           <br />
-                          <span className="font-mono tabular-nums">{disk.totalMB} MB</span>
+                          <span className="font-mono tabular-nums">{formatDiskSize(disk.totalMB)}</span>
                         </div>
                       </div>
                     </div>

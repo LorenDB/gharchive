@@ -6,6 +6,16 @@ export function formatBytes(bytes: number | null | undefined): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
+export function formatDiskSize(mb: number): string {
+  if (mb >= 1024 * 1024) {
+    return (mb / (1024 * 1024)).toFixed(1) + ' TB';
+  }
+  if (mb >= 1024) {
+    return (mb / 1024).toFixed(1) + ' GB';
+  }
+  return mb.toFixed(1) + ' MB';
+}
+
 export function formatRelativeTime(iso: string): string {
   // DB timestamps may lack Z; treat naive ISO as UTC
   const normalized = iso.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(iso) ? iso : iso + 'Z';
