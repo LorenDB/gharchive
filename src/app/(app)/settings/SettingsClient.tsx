@@ -23,6 +23,7 @@ interface Settings {
   max_memory_usage_ratio: number;
   alerts_enabled: boolean;
   apprise_api_url: string;
+  apprise_endpoint_url: string;
   apprise_config_key: string;
   apprise_urls: string[];
   apprise_use_tags: boolean;
@@ -1741,6 +1742,29 @@ export default function SettingsClient({
                     Base URL of your Apprise API container (no trailing path). Example:{' '}
                     <span className="font-mono">http://apprise:8000</span>. Can also be set
                     via env <span className="font-mono">APPRISE_API_URL</span>.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="label" htmlFor="apprise-endpoint-url">
+                    Custom endpoint URL
+                  </label>
+                  <input
+                    id="apprise-endpoint-url"
+                    type="url"
+                    className="input font-mono text-[13px]"
+                    value={draft.apprise_endpoint_url}
+                    onChange={(e) =>
+                      setDraft({ ...draft, apprise_endpoint_url: e.target.value })
+                    }
+                    placeholder="https://notify.example.com/webhook"
+                    autoComplete="off"
+                  />
+                  <p className="hint">
+                    Optional. When set, overrides the default{' '}
+                    <span className="font-mono">/notify</span> path construction and POSTs
+                    directly to this URL. Useful for custom webhooks or Apprise-compatible
+                    proxies. Leave empty to use the Apprise API URL above.
                   </p>
                 </div>
 

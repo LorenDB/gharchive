@@ -130,6 +130,7 @@ function normalizeApiUrl(url: string): string {
 export function isAlertsConfigured(settings?: Settings): boolean {
   const s = settings ?? getSettings();
   if (!s.alerts_enabled) return false;
+  if (s.apprise_endpoint_url?.trim()) return true;
   const api = s.apprise_api_url?.trim();
   if (!api) return false;
   if (s.apprise_config_key?.trim()) return true;
@@ -227,12 +228,23 @@ async function postToApprise(
   settings: Settings,
   msg: AppriseNotifyBody
 ): Promise<{ ok: boolean; error?: string }> {
-  const base = normalizeApiUrl(settings.apprise_api_url.trim());
-  const key = settings.apprise_config_key?.trim();
-  const urls = (settings.apprise_urls || []).map((u) => u.trim()).filter(Boolean);
+  const endpointOverride = settings.apprise_endpoint_url?.trim();
 
-  const path = key ? `/notify/${encodeURIComponent(key)}` : '/notify';
-  const url = `${base}${path}`;
+  let url: string;
+  let key: string | undefined;
+  let urls: string[];
+
+  if (endpointOverride) {
+    url = endpointOverride;
+    key = undefined;
+    urls = (settings.apprise_urls || []).map((u) => u.trim()).filter(Boolean);
+  } else {
+    const base = normalizeApiUrl(settings.apprise_api_url.trim());
+    key = settings.apprise_config_key?.trim();
+    urls = (settings.apprise_urls || []).map((u) => u.trim()).filter(Boolean);
+    const path = key ? `/notify/${encodeURIComponent(key)}` : '/notify';
+    url = `${base}${path}`;
+  }
 
   const payload: Record<string, unknown> = {
     title: msg.title,

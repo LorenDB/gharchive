@@ -127,6 +127,17 @@ describe('isAlertsConfigured', () => {
     } as ReturnType<typeof mockGetSettings>);
     expect(result).toBe(true);
   });
+
+  it('returns true when apprise_endpoint_url is set (no base URL needed)', () => {
+    mockGetSettings.mockReturnValue({
+      alerts_enabled: true,
+      apprise_api_url: '',
+      apprise_endpoint_url: 'https://notify.example.com/webhook',
+      apprise_config_key: '',
+      apprise_urls: [],
+    });
+    expect(isAlertsConfigured()).toBe(true);
+  });
 });
 
 describe('repoLabel', () => {

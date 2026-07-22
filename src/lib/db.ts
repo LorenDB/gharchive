@@ -56,8 +56,16 @@ export interface Settings {
    */
   apprise_api_url: string;
   /**
+   * Optional custom endpoint URL. When set, overrides the default
+   * {base}/notify or {base}/notify/{key} construction and POSTs directly
+   * to this URL. Useful for custom webhooks or compatible proxies.
+   * Admin-only (SSRF surface).
+   */
+  apprise_endpoint_url: string;
+  /**
    * Optional stateful config key. When set, posts to /notify/{key}.
    * When empty, uses stateless /notify with apprise_urls.
+   * Ignored when apprise_endpoint_url is set.
    */
   apprise_config_key: string;
   /**
@@ -125,6 +133,7 @@ export const DEFAULT_SETTINGS: Settings = {
 
   alerts_enabled: false,
   apprise_api_url: '',
+  apprise_endpoint_url: '',
   apprise_config_key: '',
   apprise_urls: [],
   apprise_use_tags: false,

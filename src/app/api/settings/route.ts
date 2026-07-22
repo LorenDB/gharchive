@@ -270,6 +270,31 @@ export async function PUT(req: NextRequest) {
         patch.apprise_api_url = u;
       }
 
+      // apprise_endpoint_url is admin-only: overrides the default /notify path
+      // construction and POSTs directly to this URL (SSRF surface).
+      if (body.apprise_endpoint_url !== undefined && userIsAdmin) {
+        if (typeof body.apprise_endpoint_url !== 'string') {
+          return NextResponse.json(
+            { error: 'apprise_endpoint_url must be a string' },
+            { status: 400 }
+          );
+        }
+        const u = body.apprise_endpoint_url.trim();
+        if (u && !/^https?:\/\//i.test(u)) {
+          return NextResponse.json(
+            { error: 'apprise_endpoint_url must start with http:// or https://' },
+            { status: 400 }
+          );
+        }
+        if (u.length > 500) {
+          return NextResponse.json(
+            { error: 'apprise_endpoint_url too long' },
+            { status: 400 }
+          );
+        }
+        patch.apprise_endpoint_url = u;
+      }
+
       if (body.apprise_config_key !== undefined) {
         if (typeof body.apprise_config_key !== 'string') {
           return NextResponse.json(
