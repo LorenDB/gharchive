@@ -51,6 +51,7 @@ export default function ImportStarsPage() {
   const [error, setError] = useState('');
   const [job, setJob] = useState<Job | null>(null);
   const [importing, setImporting] = useState(false);
+  const [hideImported, setHideImported] = useState(false);
 
   const loadPreview = useCallback(async () => {
     setLoading(true);
@@ -109,13 +110,18 @@ export default function ImportStarsPage() {
   }, [importing, job?.running, loadPreview]);
 
   const visibleStars = useMemo(() => {
-    if (segment === 'all') return stars;
+    let filtered = stars;
     if (segment === 'unlisted') {
       const set = new Set(unlisted);
-      return stars.filter((s) => set.has(s.full_name));
+      filtered = stars.filter((s) => set.has(s.full_name));
+    } else if (segment !== 'all') {
+      filtered = stars.filter((s) => s.list_ids.includes(segment));
     }
-    return stars.filter((s) => s.list_ids.includes(segment));
-  }, [stars, segment, unlisted]);
+    if (hideImported) {
+      filtered = filtered.filter((s) => !s.archived);
+    }
+    return filtered;
+  }, [stars, segment, unlisted, hideImported]);
 
   const visibleSelectedCount = visibleStars.filter((s) =>
     selected.has(s.full_name)
@@ -356,6 +362,15 @@ export default function ImportStarsPage() {
             >
               Clear view
             </button>
+            <label className="flex items-center gap-1.5 text-xs text-ink-400 cursor-pointer select-none ml-2">
+              <input
+                type="checkbox"
+                className="rounded border-ink-600 bg-ink-950 text-amber-400 focus:ring-amber-400/40"
+                checked={hideImported}
+                onChange={(e) => setHideImported(e.target.checked)}
+              />
+              Hide already imported
+            </label>
             <span className="text-xs text-ink-500 ml-auto">
               {visibleSelectedCount}/{visibleStars.length} selected in view
             </span>
