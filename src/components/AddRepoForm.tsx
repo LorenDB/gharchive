@@ -80,7 +80,7 @@ export default function AddRepoForm({ onAdded }: { onAdded: () => void }) {
                 type="text"
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://codeberg.org/owner/repo.git"
+                placeholder="https://github.com/LorenDB/gharchive.git"
                 className="input font-mono text-[13px]"
                 autoFocus
                 disabled={loading}
