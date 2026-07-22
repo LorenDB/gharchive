@@ -21,6 +21,7 @@ export default async function SettingsPage() {
         alerts_configured: data.alerts.configured,
         is_admin: data.is_admin,
         github_account: data.github_account,
+        lists: data.lists,
       }}
     />
   );

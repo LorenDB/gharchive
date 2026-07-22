@@ -644,6 +644,17 @@ export async function scanAndMaybeImportStars(
     (s) => !findRepo('github', s.owner, s.name)
   );
 
+  const filterListIds = settings.auto_import_stars_list_ids;
+  const shouldFilterByList =
+    filterListIds !== undefined && filterListIds.length > 0;
+
+  const eligibleMissing = shouldFilterByList
+    ? missing.filter((s) => {
+        const gids = preview.membership[s.full_name] || [];
+        return gids.some((gid) => filterListIds.includes(gid));
+      })
+    : missing;
+
   // Refresh list membership for already-archived stars
   for (const s of preview.stars) {
     const existing = findRepo('github', s.owner, s.name);
@@ -659,8 +670,12 @@ export async function scanAndMaybeImportStars(
     opts.forceImport ?? settings.auto_import_stars_enabled
   );
 
-  if (!shouldImport || missing.length === 0) {
+  if (!shouldImport || eligibleMissing.length === 0) {
     touchGithubScan('stars', { imported: false });
+    const filteredNote =
+      shouldFilterByList && missing.length > 0 && eligibleMissing.length === 0
+        ? ` (${missing.length} new stars outside selected lists, skipped)`
+        : '';
     return {
       kind: 'stars',
       scanned: preview.stars.length,
@@ -669,14 +684,14 @@ export async function scanAndMaybeImportStars(
       skipped: 0,
       failed: 0,
       message: shouldImport
-        ? `stars: ${preview.stars.length} scanned, none new`
+        ? `stars: ${preview.stars.length} scanned, none new${filteredNote}`
         : `stars: ${preview.stars.length} scanned, ${missing.length} missing (auto-import off)`,
     };
   }
 
   const items = itemsFromSelection(
     preview.stars,
-    missing.map((m) => m.full_name),
+    eligibleMissing.map((m) => m.full_name),
     preview.membership
   );
 

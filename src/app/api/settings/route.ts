@@ -173,6 +173,18 @@ export async function PUT(req: NextRequest) {
         }
       }
 
+      if (body.auto_import_stars_list_ids !== undefined) {
+        if (!Array.isArray(body.auto_import_stars_list_ids)) {
+          return NextResponse.json(
+            { error: 'auto_import_stars_list_ids must be an array' },
+            { status: 400 }
+          );
+        }
+        patch.auto_import_stars_list_ids = body.auto_import_stars_list_ids
+          .map(String)
+          .filter(Boolean);
+      }
+
       // Enabling auto-import implies scanning
       if (patch.auto_import_stars_enabled === true) {
         patch.auto_scan_stars_enabled = true;

@@ -12,6 +12,7 @@ interface Settings {
   concurrent_syncs: number;
   auto_scan_stars_enabled: boolean;
   auto_import_stars_enabled: boolean;
+  auto_import_stars_list_ids: string[];
   auto_scan_owned_enabled: boolean;
   auto_import_owned_enabled: boolean;
   github_scan_interval_hours: number;
@@ -150,6 +151,7 @@ type InitialSettingsData = {
     last_owned_scan_at: string | null;
     last_owned_import_at: string | null;
   } | null;
+  lists: { id: number; name: string; github_list_id: string | null }[];
 };
 
 export default function SettingsClient({
@@ -192,6 +194,9 @@ export default function SettingsClient({
     (initial.settings?.apprise_urls || []).join('\n')
   );
   const [isAdmin, setIsAdmin] = useState(initial.is_admin);
+  const [ghLists, setGhLists] = useState<{ id: number; name: string; github_list_id: string | null }[]>(
+    initial.lists
+  );
 
   async function linkGithub(e: React.FormEvent) {
     e.preventDefault();
@@ -612,6 +617,40 @@ export default function SettingsClient({
                   label="Auto-import stars"
                 />
               </div>
+              {draft.auto_import_stars_enabled && ghLists.filter(l => l.github_list_id).length > 0 && (
+                <div className="pt-2 border-t border-ink-800/80 pl-0 sm:pl-2">
+                  <p className="text-xs text-ink-400 mb-2">
+                    Only auto-import stars in selected lists (select none to import all):
+                  </p>
+                  <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                    {ghLists.filter(l => l.github_list_id).map((list) => {
+                      const checked = (draft.auto_import_stars_list_ids || []).includes(list.github_list_id!);
+                      return (
+                        <label
+                          key={list.id}
+                          className="flex items-center gap-2 text-sm text-ink-300 cursor-pointer"
+                        >
+                          <input
+                            type="checkbox"
+                            className="rounded border-ink-600 bg-ink-950 text-amber-400"
+                            checked={checked}
+                            onChange={() => {
+                              const ids = draft.auto_import_stars_list_ids || [];
+                              setDraft({
+                                ...draft,
+                                auto_import_stars_list_ids: checked
+                                  ? ids.filter(id => id !== list.github_list_id)
+                                  : [...ids, list.github_list_id!],
+                              });
+                            }}
+                          />
+                          {list.name}
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="rounded-lg border border-ink-800 bg-ink-950/40 p-4 space-y-4">

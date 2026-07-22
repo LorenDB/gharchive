@@ -12,6 +12,7 @@ import {
   getGithubAccountPublic,
   DEFAULT_SETTINGS,
   type Settings,
+  type List,
 } from '@/lib/db';
 import { getSchedulerStatus } from '@/lib/scheduler';
 import {
@@ -135,6 +136,7 @@ export async function getSettingsPageData(user: SessionUser): Promise<{
   disk: Awaited<ReturnType<typeof getDiskInfo>> | null;
   is_admin: boolean;
   github_account: ReturnType<typeof getGithubAccountPublic>;
+  lists: { id: number; name: string; github_list_id: string | null }[];
 }> {
   const settings = getSettings();
   let disk = null;
@@ -143,6 +145,12 @@ export async function getSettingsPageData(user: SessionUser): Promise<{
   } catch {
     disk = null;
   }
+
+  const allLists = getLists().map((l) => ({
+    id: l.id,
+    name: l.name,
+    github_list_id: l.github_list_id ?? null,
+  }));
 
   return {
     settings,
@@ -159,5 +167,6 @@ export async function getSettingsPageData(user: SessionUser): Promise<{
     disk,
     is_admin: isAdmin(user),
     github_account: getGithubAccountPublic(),
+    lists: allLists,
   };
 }

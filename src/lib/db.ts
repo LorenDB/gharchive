@@ -25,6 +25,11 @@ export interface Settings {
   auto_scan_stars_enabled: boolean;
   /** When scanning stars, auto-archive any not yet mirrored */
   auto_import_stars_enabled: boolean;
+  /**
+   * When auto-importing stars, only import repos that belong to at least one
+   * of these GitHub list IDs (GraphQL node IDs). Empty = import all new stars.
+   */
+  auto_import_stars_list_ids: string[];
   /** Scan repositories owned by the linked account */
   auto_scan_owned_enabled: boolean;
   /** When scanning owned repos, auto-archive any not yet mirrored */
@@ -100,6 +105,7 @@ export const DEFAULT_SETTINGS: Settings = {
   concurrent_syncs: 1,
   auto_scan_stars_enabled: false,
   auto_import_stars_enabled: false,
+  auto_import_stars_list_ids: [],
   auto_scan_owned_enabled: false,
   auto_import_owned_enabled: false,
   github_scan_interval_hours: 24,
