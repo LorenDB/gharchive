@@ -5,7 +5,7 @@ import {
   getListCounts,
   LIST_COLORS,
 } from '@/lib/db';
-import { withApiUser } from '@/lib/api-auth';
+import { withApiUser, checkRateLimit, checkCsrf } from '@/lib/api-auth';
 
 export async function GET() {
   return withApiUser(async () => {
@@ -21,6 +21,11 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const rateLimited = checkRateLimit(req, { maxRequests: 30, windowMs: 60_000 });
+  if (rateLimited) return rateLimited;
+  const csrfFailed = checkCsrf(req);
+  if (csrfFailed) return csrfFailed;
+
   return withApiUser(async () => {
     try {
       const body = await req.json();

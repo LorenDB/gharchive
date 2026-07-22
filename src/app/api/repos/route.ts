@@ -14,7 +14,7 @@ import {
 import { getMirrorPath, cloneMirror } from '@/lib/git';
 import { parseCloneUrl } from '@/lib/releases';
 import { syncRepo } from '@/lib/sync';
-import { withApiUser } from '@/lib/api-auth';
+import { withApiUser, checkRateLimit, checkCsrf } from '@/lib/api-auth';
 import { getImportStatus, enqueueRepoImport, type ImportItem } from '@/lib/import-stars';
 import { fetchRemoteRepoMeta } from '@/lib/remote-meta';
 import { tryGetUserId } from '@/lib/user-context';
@@ -64,12 +64,20 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const rateLimited = checkRateLimit(req, { maxRequests: 20, windowMs: 60_000 });
+  if (rateLimited) return rateLimited;
+  const csrfFailed = checkCsrf(req);
+  if (csrfFailed) return csrfFailed;
+
   return withApiUser(async () => {
     try {
       const body = await req.json();
       const { clone_url } = body;
       if (!clone_url || typeof clone_url !== 'string') {
         return NextResponse.json({ error: 'clone_url is required' }, { status: 400 });
+      }
+      if (clone_url.length > 2000) {
+        return NextResponse.json({ error: 'clone_url too long' }, { status: 400 });
       }
 
       const { platform, owner, repo } = parseCloneUrl(clone_url);

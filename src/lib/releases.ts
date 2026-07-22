@@ -6,6 +6,7 @@ import {
   tryGetUserId,
 } from '@/lib/user-context';
 import { hasEnoughMemory } from '@/lib/memory';
+import { assertSafePathSegment } from '@/lib/git';
 
 function getReleasesDir(): string {
   const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
@@ -33,6 +34,13 @@ export function parseCloneUrl(url: string): {
   repo: string;
   projectPath: string;
 } {
+  if (!url || typeof url !== 'string' || url.length > 2000) {
+    throw new Error('Invalid repository URL');
+  }
+  if (/[\0\n\r;|&$`"'\\]/.test(url)) {
+    throw new Error('Invalid repository URL: unsafe characters');
+  }
+
   const cleaned = url.replace(/\.git$/, '').replace(/\/$/, '');
 
   const sshMatch = cleaned.match(/^git@([^:]+):(.+)$/);
@@ -190,23 +198,27 @@ export function getReleaseAssetPath(
   filename: string,
   options?: ReleasePathOptions | string
 ): string {
-  // Back-compat: last arg used to be userId string
+  const safePlatform = assertSafePathSegment(platform, 'platform');
+  const safeOwner = assertSafePathSegment(owner, 'owner');
+  const safeRepo = assertSafePathSegment(repo, 'repo');
+  const safeTag = assertSafePathSegment(tag, 'tag');
+  const safeFilename = assertSafePathSegment(filename, 'filename');
   const opts: ReleasePathOptions =
     typeof options === 'string' ? { userId: options } : options || {};
   const releasesDir = getReleasesDir();
   const isPrivate = Boolean(opts.isPrivate);
   if (!isPrivate) {
-    return path.join(releasesDir, platform, owner, repo, tag, filename);
+    return path.join(releasesDir, safePlatform, safeOwner, safeRepo, safeTag, safeFilename);
   }
   const uid = opts.userId ?? tryGetUserId() ?? AUTOLOGIN_USER_ID;
   return path.join(
     releasesDir,
     'users',
     safeUserPathSegment(uid),
-    platform,
-    owner,
-    repo,
-    tag,
-    filename
+    safePlatform,
+    safeOwner,
+    safeRepo,
+    safeTag,
+    safeFilename
   );
 }

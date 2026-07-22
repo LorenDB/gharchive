@@ -127,10 +127,12 @@ export async function runScheduledSync(
             );
 
         // Skip memberships whose archive was already synced this tick (shared public)
-        const work = due.filter((r) => {
-          if (syncedArchiveIds.has(r.archive_id)) return false;
-          return true;
-        });
+        const work = [];
+        for (const r of due) {
+          if (syncedArchiveIds.has(r.archive_id)) continue;
+          syncedArchiveIds.add(r.archive_id);
+          work.push(r);
+        }
 
         let uSynced = 0;
         let uFailed = 0;
@@ -148,12 +150,6 @@ export async function runScheduledSync(
         }
 
         await mapPool(work, adjustedConcurrency, async (repo) => {
-          // Claim archive before sync so concurrent pool workers don't double-fetch
-          if (syncedArchiveIds.has(repo.archive_id)) {
-            uSkippedShared++;
-            return;
-          }
-          syncedArchiveIds.add(repo.archive_id);
           try {
             const result = await syncRepo(repo);
             if (result.ok) uSynced++;

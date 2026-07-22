@@ -3,6 +3,15 @@ import { getGithubToken } from '@/lib/db';
 const GITHUB_API = 'https://api.github.com';
 const GITHUB_GQL = 'https://api.github.com/graphql';
 
+function hashToken(token: string): string {
+  // Simple hash: use a truncated hex digest of the token for cache-key only
+  let hash = 0;
+  for (let i = 0; i < token.length; i++) {
+    hash = ((hash << 5) - hash + token.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash).toString(16).padStart(8, '0');
+}
+
 // ── In-memory TTL cache for GitHub API responses ────────────────
 
 interface CacheEntry<T> {
@@ -292,7 +301,7 @@ export async function fetchOwnedRepos(
 ): Promise<GhOwnedRepo[]> {
   const includeForks = opts.includeForks ?? false;
   const includePrivate = opts.includePrivate ?? true;
-  const cacheKey = `${token}\0f=${includeForks}&p=${includePrivate}`;
+  const cacheKey = `stars\0${hashToken(token)}`;
 
   const hit = cached(ownedReposCache, cacheKey);
   if (hit) return hit;
@@ -359,7 +368,8 @@ export async function fetchStarsPreview(
   const t = token || getGithubToken();
   if (!t) throw new Error('No GitHub token configured');
 
-  const hit = cached(starsPreviewCache, t);
+  const cacheKey = `starspreview\0${hashToken(t)}`;
+  const hit = cached(starsPreviewCache, cacheKey);
   if (hit) return hit;
 
   const [user, stars, lists] = await Promise.all([
@@ -384,6 +394,6 @@ export async function fetchStarsPreview(
     .filter((n) => !listed.has(n));
 
   const result = { user, stars, lists, membership, unlisted };
-  setCached(starsPreviewCache, t, result);
+  setCached(starsPreviewCache, cacheKey, result);
   return result;
 }

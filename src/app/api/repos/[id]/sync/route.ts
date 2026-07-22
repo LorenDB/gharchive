@@ -1,12 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import { syncRepo } from '@/lib/sync';
-import { withApiUser } from '@/lib/api-auth';
+import { withApiUser, checkRateLimit, checkCsrf } from '@/lib/api-auth';
 
 export async function POST(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  const rateLimited = checkRateLimit(req, { maxRequests: 5, windowMs: 60_000 });
+  if (rateLimited) return rateLimited;
+  const csrfFailed = checkCsrf(req);
+  if (csrfFailed) return csrfFailed;
+
   return withApiUser(async () => {
     const { repos } = getDb();
     const repo = repos.find((r) => r.id === parseInt(params.id));

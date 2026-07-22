@@ -27,6 +27,31 @@ function assertMemory(label: string): void {
   }
 }
 
+const MAX_PATH_SEGMENT = 255;
+
+export function assertSafePathSegment(segment: string, label: string): string {
+  if (!segment || typeof segment !== 'string') {
+    throw new Error(`Invalid ${label}: empty`);
+  }
+  if (segment.length > MAX_PATH_SEGMENT) {
+    throw new Error(`Invalid ${label}: too long`);
+  }
+  if (
+    segment.includes('..') ||
+    segment.includes('/') ||
+    segment.includes('\\')
+  ) {
+    throw new Error(`Invalid ${label}: unsafe path segment`);
+  }
+  if (/[\0\n\r;|&$`"' ]/.test(segment)) {
+    throw new Error(`Invalid ${label}: unsafe characters`);
+  }
+  if (segment.startsWith('-')) {
+    throw new Error(`Invalid ${label}: starts with dash`);
+  }
+  return segment;
+}
+
 export type MirrorPathOptions = {
   /** Private archives are isolated per user; public use a shared path. */
   isPrivate?: boolean;
@@ -44,22 +69,24 @@ export function getMirrorPath(
   name: string,
   options?: MirrorPathOptions | string
 ): string {
-  // Back-compat: third arg used to be userId string
+  const safePlatform = assertSafePathSegment(platform, 'platform');
+  const safeOwner = assertSafePathSegment(owner, 'owner');
+  const safeName = assertSafePathSegment(name.replace(/\.git$/, ''), 'name');
   const opts: MirrorPathOptions =
     typeof options === 'string' ? { userId: options } : options || {};
   const isPrivate = Boolean(opts.isPrivate);
   const mirrorsDir = getMirrorsDir();
   if (!isPrivate) {
-    return path.join(mirrorsDir, platform, owner, name + '.git');
+    return path.join(mirrorsDir, safePlatform, safeOwner, safeName + '.git');
   }
   const uid = opts.userId ?? tryGetUserId() ?? AUTOLOGIN_USER_ID;
   return path.join(
     mirrorsDir,
     'users',
     safeUserPathSegment(uid),
-    platform,
-    owner,
-    name + '.git'
+    safePlatform,
+    safeOwner,
+    safeName + '.git'
   );
 }
 
@@ -72,29 +99,53 @@ function looksLikeBareRepo(mirrorPath: string): boolean {
 }
 
 /**
- * Clone a bare mirror. If `mirrorPath` already holds a bare repo, reuses it
- * (critical for shared public archives — never wipe another user's data).
+ * Clone a bare mirror. Uses a temporary directory + atomic rename to avoid
+ * TOCTOU races and serializes via withMirrorLock so concurrent requests
+ * for the same path never clash.
  */
 export async function cloneMirror(
   cloneUrl: string,
   mirrorPath: string
 ): Promise<{ reused: boolean }> {
-  assertMemory(`clone ${cloneUrl}`);
-  const dir = path.dirname(mirrorPath);
-  fs.mkdirSync(dir, { recursive: true });
+  return withMirrorLock(mirrorPath, async () => {
+    assertMemory(`clone ${cloneUrl}`);
+    assertSafeGitArg(cloneUrl, 'clone_url');
+    assertSafeGitArg(mirrorPath, 'mirror_path');
+    const dir = path.dirname(mirrorPath);
+    fs.mkdirSync(dir, { recursive: true });
 
-  if (fs.existsSync(mirrorPath)) {
-    if (looksLikeBareRepo(mirrorPath)) {
-      await applyGcProtection(mirrorPath);
-      return { reused: true };
+    if (fs.existsSync(mirrorPath)) {
+      if (looksLikeBareRepo(mirrorPath)) {
+        await applyGcProtection(mirrorPath);
+        return { reused: true };
+      }
+      fs.rmSync(mirrorPath, { recursive: true, force: true });
     }
-    // Corrupt / incomplete prior attempt
-    fs.rmSync(mirrorPath, { recursive: true, force: true });
-  }
 
-  await run(`git clone --bare --mirror "${cloneUrl}" "${mirrorPath}"`);
-  await applyGcProtection(mirrorPath);
-  return { reused: false };
+    const tmpDir = path.join(
+      dir,
+      `.tmp-clone-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    );
+    fs.mkdirSync(tmpDir, { recursive: true });
+    try {
+      await run(`git clone --bare --mirror "${cloneUrl}" "${tmpDir}"`);
+      try {
+        fs.renameSync(tmpDir, mirrorPath);
+      } catch (renameErr: any) {
+        if (fs.existsSync(mirrorPath) && looksLikeBareRepo(mirrorPath)) {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+          await applyGcProtection(mirrorPath);
+          return { reused: true };
+        }
+        throw renameErr;
+      }
+      await applyGcProtection(mirrorPath);
+      return { reused: false };
+    } catch (err) {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      throw err;
+    }
+  });
 }
 
 /** Serialize concurrent git ops on the same bare mirror path. */
@@ -118,10 +169,14 @@ export async function withMirrorLock<T>(
     return await fn();
   } finally {
     resolveNext();
+    setTimeout(() => {
+      if (mirrorLocks.get(key) === held) mirrorLocks.delete(key);
+    }, 0);
   }
 }
 
 async function applyGcProtection(mirrorPath: string): Promise<void> {
+  assertSafeGitArg(mirrorPath, 'mirror_path');
   const settings = [
     'gc.auto 0',
     'gc.pruneExpire never',
@@ -315,6 +370,15 @@ export function isRemoteMissingError(message: string): boolean {
 }
 
 export async function deleteMirror(mirrorPath: string): Promise<void> {
+  try {
+    const stat = fs.lstatSync(mirrorPath);
+    if (stat.isSymbolicLink()) {
+      throw new Error(`Refusing to delete symlink: ${mirrorPath}`);
+    }
+  } catch (err: any) {
+    if (err.code === 'ENOENT') return;
+    throw err;
+  }
   if (fs.existsSync(mirrorPath)) {
     fs.rmSync(mirrorPath, { recursive: true, force: true });
   }
@@ -408,8 +472,11 @@ export interface TreeEntry {
 
 /** Sanitize a ref or path segment used in git commands. */
 function assertSafeGitArg(value: string, label: string): string {
-  if (!value || /[\0\n\r;|&$`\\]/.test(value) || value.includes('..')) {
+  if (!value || /[\0\n\r;|&$`\\"' ]/.test(value) || value.includes('..')) {
     throw new Error(`Invalid ${label}`);
+  }
+  if (value.startsWith('-')) {
+    throw new Error(`Invalid ${label}: starts with dash`);
   }
   return value;
 }
@@ -473,7 +540,11 @@ export async function getBlob(
   filePath: string
 ): Promise<BlobResult> {
   const safeRef = assertSafeGitArg(ref, 'ref');
-  const safePath = assertSafeGitArg(filePath.replace(/^\/+/, ''), 'path');
+  const normalized = normalizeRepoRelativePath('', filePath);
+  if (normalized == null) {
+    throw new Error('Invalid path');
+  }
+  const safePath = assertSafeGitArg(normalized, 'path');
   const treeish = `${safeRef}:${safePath}`;
 
   const { stdout: sizeStr } = await run(

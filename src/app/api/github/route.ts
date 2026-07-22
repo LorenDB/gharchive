@@ -5,7 +5,7 @@ import {
   clearGithubAccount,
 } from '@/lib/db';
 import { validateGithubToken } from '@/lib/github';
-import { withApiUser } from '@/lib/api-auth';
+import { withApiUser, checkRateLimit, checkCsrf } from '@/lib/api-auth';
 
 export async function GET() {
   return withApiUser(async () => {
@@ -15,6 +15,11 @@ export async function GET() {
 
 /** Link a GitHub account via personal access token. */
 export async function PUT(req: NextRequest) {
+  const rateLimited = checkRateLimit(req, { maxRequests: 10, windowMs: 60_000 });
+  if (rateLimited) return rateLimited;
+  const csrfFailed = checkCsrf(req);
+  if (csrfFailed) return csrfFailed;
+
   return withApiUser(async () => {
     try {
       const body = await req.json();
@@ -44,7 +49,12 @@ export async function PUT(req: NextRequest) {
   });
 }
 
-export async function DELETE() {
+export async function DELETE(req: NextRequest) {
+  const rateLimited = checkRateLimit(req, { maxRequests: 10, windowMs: 60_000 });
+  if (rateLimited) return rateLimited;
+  const csrfFailed = checkCsrf(req);
+  if (csrfFailed) return csrfFailed;
+
   return withApiUser(async () => {
     clearGithubAccount();
     return NextResponse.json({ ok: true });

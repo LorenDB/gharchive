@@ -46,13 +46,27 @@ export {
 function getSessionSecret(): string {
   const secret = process.env.SESSION_SECRET?.trim();
   if (secret) return secret;
-  // Dev / autologin only — OIDC paths refuse to mint sessions without a secret.
   return 'gharchive-dev-insecure-session-secret';
+}
+
+function isProduction(): boolean {
+  return process.env.NODE_ENV === 'production';
 }
 
 export function hasSecureSessionSecret(): boolean {
   const secret = process.env.SESSION_SECRET?.trim();
   return Boolean(secret && secret.length >= 16);
+}
+
+function requireSecureSecret(): string {
+  const secret = getSessionSecret();
+  if (!hasSecureSessionSecret() && isProduction()) {
+    throw new Error(
+      'SESSION_SECRET is not set or too short (min 16 characters). ' +
+        'The dev secret is never accepted in production.'
+    );
+  }
+  return secret;
 }
 
 function base64UrlEncode(data: ArrayBuffer | Uint8Array | string): string {
@@ -125,23 +139,25 @@ async function verifySig(
 
 export async function sealPayload<T extends object>(
   payload: T,
-  secret = getSessionSecret()
+  secret?: string
 ): Promise<string> {
+  const key = secret ?? requireSecureSecret();
   const payloadB64 = base64UrlEncode(JSON.stringify(payload));
-  const sig = await sign(payloadB64, secret);
+  const sig = await sign(payloadB64, key);
   return `${payloadB64}.${sig}`;
 }
 
 export async function unsealPayload<T>(
   token: string | undefined | null,
-  secret = getSessionSecret()
+  secret?: string
 ): Promise<T | null> {
   if (!token) return null;
+  const key = secret ?? requireSecureSecret();
   const parts = token.split('.');
   if (parts.length !== 2) return null;
   const [payloadB64, sigB64] = parts;
   if (!payloadB64 || !sigB64) return null;
-  if (!(await verifySig(payloadB64, sigB64, secret))) return null;
+  if (!(await verifySig(payloadB64, sigB64, key))) return null;
   try {
     const json = base64UrlDecodeToString(payloadB64);
     return JSON.parse(json) as T;

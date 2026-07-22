@@ -82,7 +82,10 @@ export async function GET(req: NextRequest) {
       }
     }
     if (!claims && tokens.id_token) {
-      claims = decodeJwtPayload(tokens.id_token);
+      claims = decodeJwtPayload(tokens.id_token, {
+        expectedIssuer: meta.issuer,
+        expectedClientId: config.clientId,
+      });
     }
     if (!claims?.sub) {
       return redirectLoginError(

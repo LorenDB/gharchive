@@ -7,7 +7,7 @@ import {
   getListRepoIds,
   getDb,
 } from '@/lib/db';
-import { withApiUser } from '@/lib/api-auth';
+import { withApiUser, checkRateLimit, checkCsrf } from '@/lib/api-auth';
 
 export async function GET(
   _req: NextRequest,
@@ -36,6 +36,11 @@ export async function PUT(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  const rateLimited = checkRateLimit(req, { maxRequests: 30, windowMs: 60_000 });
+  if (rateLimited) return rateLimited;
+  const csrfFailed = checkCsrf(req);
+  if (csrfFailed) return csrfFailed;
+
   return withApiUser(async () => {
     const id = parseInt(params.id, 10);
     if (!getList(id)) {
@@ -75,9 +80,14 @@ export async function PUT(
 }
 
 export async function DELETE(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  const rateLimited = checkRateLimit(req, { maxRequests: 30, windowMs: 60_000 });
+  if (rateLimited) return rateLimited;
+  const csrfFailed = checkCsrf(req);
+  if (csrfFailed) return csrfFailed;
+
   return withApiUser(async () => {
     const id = parseInt(params.id, 10);
     if (!getList(id)) {

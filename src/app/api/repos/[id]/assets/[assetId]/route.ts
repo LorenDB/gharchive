@@ -39,8 +39,24 @@ export async function GET(
     }
 
     if (!asset.file_path || !fs.existsSync(asset.file_path)) {
-      // Fall back to original download URL if we have it
       if (asset.download_url) {
+        try {
+          const u = new URL(asset.download_url);
+          if (
+            (u.protocol !== 'https:' && u.protocol !== 'http:') ||
+            !/^github\.com$|^api\.github\.com$|^gitlab\.com$|^objects\.githubusercontent\.com$/.test(u.hostname)
+          ) {
+            return NextResponse.json(
+              { error: 'Asset download URL not trusted' },
+              { status: 502 }
+            );
+          }
+        } catch {
+          return NextResponse.json(
+            { error: 'Asset download URL invalid' },
+            { status: 502 }
+          );
+        }
         return NextResponse.redirect(asset.download_url);
       }
       return NextResponse.json(

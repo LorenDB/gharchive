@@ -8,7 +8,7 @@ import {
   requireGithubToken,
   scanAndMaybeImportStars,
 } from '@/lib/import-stars';
-import { withApiUser } from '@/lib/api-auth';
+import { withApiUser, checkRateLimit, checkCsrf } from '@/lib/api-auth';
 
 export async function GET() {
   return withApiUser(async () => {
@@ -23,6 +23,11 @@ export async function GET() {
  * - { full_names: string[], list_ids?: string[] } — manual selection
  */
 export async function POST(req: NextRequest) {
+  const rateLimited = checkRateLimit(req, { maxRequests: 10, windowMs: 60_000 });
+  if (rateLimited) return rateLimited;
+  const csrfFailed = checkCsrf(req);
+  if (csrfFailed) return csrfFailed;
+
   return withApiUser(async () => {
     try {
       const body = await req.json().catch(() => ({}));
@@ -96,7 +101,12 @@ export async function POST(req: NextRequest) {
   });
 }
 
-export async function DELETE() {
+export async function DELETE(req: NextRequest) {
+  const rateLimited = checkRateLimit(req, { maxRequests: 10, windowMs: 60_000 });
+  if (rateLimited) return rateLimited;
+  const csrfFailed = checkCsrf(req);
+  if (csrfFailed) return csrfFailed;
+
   return withApiUser(async () => {
     const job = cancelImport();
     return NextResponse.json({ ok: true, job });

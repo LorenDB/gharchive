@@ -39,6 +39,8 @@ export interface OidcClaims {
   family_name?: string;
   nickname?: string;
   groups?: string[];
+  iss?: string;
+  aud?: string | string[];
 }
 
 let metadataCache: { issuer: string; meta: OidcMetadata; fetchedAt: number } | null =
@@ -194,8 +196,8 @@ export async function fetchUserInfo(
   return (await res.json()) as OidcClaims;
 }
 
-/** Decode JWT payload without verification (id_token fallback when no userinfo). */
-export function decodeJwtPayload(jwt: string): OidcClaims | null {
+/** Decode JWT payload without cryptographic verification. */
+function rawDecodeJwtPayload(jwt: string): OidcClaims | null {
   try {
     const parts = jwt.split('.');
     if (parts.length < 2 || !parts[1]) return null;
@@ -207,6 +209,41 @@ export function decodeJwtPayload(jwt: string): OidcClaims | null {
     return null;
   }
 }
+
+/**
+ * Decode and validate id_token JWT payload.
+ * Always prefer fetchUserInfo over this fallback. Must pass
+ * basic structural checks; callers should validate iss/aud.
+ */
+export function decodeJwtPayload(
+  jwt: string,
+  opts?: { expectedIssuer?: string; expectedClientId?: string }
+): OidcClaims | null {
+  const claims = rawDecodeJwtPayload(jwt);
+  if (!claims?.sub) return null;
+
+  if (opts?.expectedIssuer && claims.iss && claims.iss !== opts.expectedIssuer) {
+    console.error('[oidc] id_token iss mismatch:', claims.iss, 'expected:', opts.expectedIssuer);
+    return null;
+  }
+
+  if (opts?.expectedClientId) {
+    const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+    if (claims.aud && !aud.includes(opts.expectedClientId)) {
+      console.error('[oidc] id_token aud mismatch:', claims.aud, 'expected:', opts.expectedClientId);
+      return null;
+    }
+  }
+
+  return claims;
+}
+
+/** Low-level decode: raw payload without validation. Prefer decodeJwtPayload. */
+function rawDecodeForTests(jwt: string): OidcClaims | null {
+  return rawDecodeJwtPayload(jwt);
+}
+
+export { rawDecodeForTests };
 
 export function getAdminGroup(): string | null {
   return process.env.OIDC_ADMIN_GROUP?.trim() || null;

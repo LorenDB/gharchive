@@ -9,7 +9,7 @@ import {
   cancelImport,
   scanAndMaybeImportOwned,
 } from '@/lib/import-stars';
-import { withApiUser } from '@/lib/api-auth';
+import { withApiUser, checkRateLimit, checkCsrf } from '@/lib/api-auth';
 
 const CACHE_HEADERS = {
   'Cache-Control': 'private, max-age=30, stale-while-revalidate=60',
@@ -75,6 +75,11 @@ export async function GET() {
  * Body: { full_names?: string[], all_missing?: boolean, scan?: boolean, force_import?: boolean }
  */
 export async function POST(req: NextRequest) {
+  const rateLimited = checkRateLimit(req, { maxRequests: 10, windowMs: 60_000 });
+  if (rateLimited) return rateLimited;
+  const csrfFailed = checkCsrf(req);
+  if (csrfFailed) return csrfFailed;
+
   return withApiUser(async () => {
     try {
       const body = await req.json().catch(() => ({}));
@@ -125,7 +130,12 @@ export async function POST(req: NextRequest) {
   });
 }
 
-export async function DELETE() {
+export async function DELETE(req: NextRequest) {
+  const rateLimited = checkRateLimit(req, { maxRequests: 10, windowMs: 60_000 });
+  if (rateLimited) return rateLimited;
+  const csrfFailed = checkCsrf(req);
+  if (csrfFailed) return csrfFailed;
+
   return withApiUser(async () => {
     const job = cancelImport();
     return NextResponse.json({ ok: true, job });

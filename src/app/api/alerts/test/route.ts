@@ -1,17 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { withApiUser } from '@/lib/api-auth';
+import { withApiUser, checkRateLimit, checkCsrf } from '@/lib/api-auth';
 import {
   ALERT_CATEGORIES,
   sendTestAlert,
   type AlertCategory,
 } from '@/lib/alerts';
 
-/**
- * POST /api/alerts/test
- * Body: { category?: AlertCategory }
- * Sends a test Apprise notification for the given (or default) category.
- */
 export async function POST(req: NextRequest) {
+  const rateLimited = checkRateLimit(req, { maxRequests: 5, windowMs: 60_000 });
+  if (rateLimited) return rateLimited;
+  const csrfFailed = checkCsrf(req);
+  if (csrfFailed) return csrfFailed;
+
   return withApiUser(async () => {
     try {
       const body = await req.json().catch(() => ({}));

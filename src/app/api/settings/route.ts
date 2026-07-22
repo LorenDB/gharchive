@@ -11,7 +11,7 @@ import {
   runScheduledGithubScan,
   startScheduler,
 } from '@/lib/scheduler';
-import { withApiUser } from '@/lib/api-auth';
+import { withApiUser, checkRateLimit, checkCsrf } from '@/lib/api-auth';
 import { getRequiredUserId } from '@/lib/user-context';
 import { isAdmin } from '@/lib/auth';
 import {
@@ -106,6 +106,11 @@ export async function GET() {
 }
 
 export async function PUT(req: NextRequest) {
+  const rateLimited = checkRateLimit(req, { maxRequests: 60, windowMs: 60_000 });
+  if (rateLimited) return rateLimited;
+  const csrfFailed = checkCsrf(req);
+  if (csrfFailed) return csrfFailed;
+
   return withApiUser(async (user) => {
     try {
       const body = await req.json();
@@ -339,6 +344,11 @@ export async function PUT(req: NextRequest) {
  * Defaults: sync only (force). Set github_scan:true to run star/owned scan.
  */
 export async function POST(req: NextRequest) {
+  const rateLimited = checkRateLimit(req, { maxRequests: 10, windowMs: 60_000 });
+  if (rateLimited) return rateLimited;
+  const csrfFailed = checkCsrf(req);
+  if (csrfFailed) return csrfFailed;
+
   return withApiUser(async () => {
     try {
       const body = await req.json().catch(() => ({}));
