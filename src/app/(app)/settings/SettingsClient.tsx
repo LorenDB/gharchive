@@ -1913,42 +1913,51 @@ export default function SettingsClient({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-ink-800/80">
-                      {users.map((u) => (
-                        <tr key={u.id} className="align-top">
-                          <td className="py-3 pr-3">
-                            <div className="font-medium text-ink-100">
-                              {u.username}
-                              {!u.registered && (
-                                <span className="ml-2 text-[10px] uppercase tracking-wide text-ink-600">
-                                  data only
+                      {users.map((u) => {
+                        const primaryLabel = u.username;
+                        const showIdLine = u.id && u.id !== primaryLabel;
+                        const secondaryBits = [u.name, u.email].filter(
+                          (v) => v && v !== primaryLabel
+                        );
+                        return (
+                          <tr key={u.id} className="align-top">
+                            <td className="py-3 pr-3">
+                              <div className="font-medium text-ink-100">
+                                {primaryLabel}
+                                {!u.registered && (
+                                  <span className="ml-2 text-[10px] uppercase tracking-wide text-ink-600">
+                                    data only
+                                  </span>
+                                )}
+                              </div>
+                              {secondaryBits.length > 0 && (
+                                <div className="text-xs text-ink-500 mt-0.5">
+                                  {secondaryBits.join(' · ')}
+                                </div>
+                              )}
+                              {showIdLine && (
+                                <div className="text-[10px] font-mono text-ink-600 mt-0.5 break-all">
+                                  {u.id}
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-3 pr-3 text-ink-300 whitespace-nowrap">
+                              <span className="font-mono tabular-nums">{u.repo_count}</span>
+                              {u.private_repo_count > 0 && (
+                                <span className="text-ink-500 text-xs ml-1">
+                                  ({u.private_repo_count} private)
                                 </span>
                               )}
-                            </div>
-                            {(u.name || u.email) && (
-                              <div className="text-xs text-ink-500 mt-0.5">
-                                {[u.name, u.email].filter(Boolean).join(' · ')}
-                              </div>
-                            )}
-                            <div className="text-[10px] font-mono text-ink-600 mt-0.5 break-all">
-                              {u.id}
-                            </div>
-                          </td>
-                          <td className="py-3 pr-3 text-ink-300 whitespace-nowrap">
-                            <span className="font-mono tabular-nums">{u.repo_count}</span>
-                            {u.private_repo_count > 0 && (
-                              <span className="text-ink-500 text-xs ml-1">
-                                ({u.private_repo_count} private)
-                              </span>
-                            )}
-                          </td>
-                          <td className="py-3 pr-3 text-right font-mono tabular-nums text-ink-200 whitespace-nowrap">
-                            {formatBytes(u.storage_bytes)}
-                          </td>
-                          <td className="py-3 text-right text-xs text-ink-500 whitespace-nowrap">
-                            {u.last_login_at ? formatDate(u.last_login_at) : '—'}
-                          </td>
-                        </tr>
-                      ))}
+                            </td>
+                            <td className="py-3 pr-3 text-right font-mono tabular-nums text-ink-200 whitespace-nowrap">
+                              {formatBytes(u.storage_bytes)}
+                            </td>
+                            <td className="py-3 text-right text-xs text-ink-500 whitespace-nowrap">
+                              {u.last_login_at ? formatDate(u.last_login_at) : '—'}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                     <tfoot>
                       <tr className="border-t border-ink-800 text-xs text-ink-500">

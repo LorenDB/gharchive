@@ -23,6 +23,7 @@ export default async function AppLayout({
         user={
           user
             ? {
+                id: user.id,
                 username: user.username,
                 name: user.name,
                 email: user.email,

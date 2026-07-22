@@ -9,6 +9,7 @@ import {
   getOidcConfig,
   getAdminGroup,
   isOidcConfigured,
+  mergeOidcClaims,
   type OidcClaims,
 } from '@/lib/oidc';
 import {
@@ -102,10 +103,12 @@ export async function GET(req: NextRequest) {
       codeVerifier: oauth.codeVerifier,
     });
 
-    // Always validate id_token nonce to prevent replay attacks (OIDC Core §3.1.3.7),
-    // even when userinfo is the primary claims source.
+    // Always validate id_token when present (OIDC Core §3.1.3.7 nonce check).
+    // Profile claims often live only on the id_token; userinfo may be sparse
+    // (sub-only). Merge both so neither source alone can drop the other.
+    let idClaims: OidcClaims | null = null;
     if (tokens.id_token) {
-      const idClaims = decodeJwtPayload(tokens.id_token, {
+      idClaims = decodeJwtPayload(tokens.id_token, {
         expectedIssuer: meta.issuer,
         expectedClientId: config.clientId,
         expectedNonce: oauth.nonce,
@@ -115,21 +118,17 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    let claims: OidcClaims | null = null;
+    let userInfoClaims: OidcClaims | null = null;
     if (meta.userinfo_endpoint && tokens.access_token) {
       try {
-        claims = await fetchUserInfo(meta, tokens.access_token);
+        userInfoClaims = await fetchUserInfo(meta, tokens.access_token);
       } catch (e) {
-        console.warn('[auth/callback] userinfo failed, falling back to id_token', e);
+        console.warn('[auth/callback] userinfo failed, using id_token claims', e);
       }
     }
-    if (!claims && tokens.id_token) {
-      claims = decodeJwtPayload(tokens.id_token, {
-        expectedIssuer: meta.issuer,
-        expectedClientId: config.clientId,
-        expectedNonce: oauth.nonce,
-      });
-    }
+
+    // Prefer id_token as base (nonce-validated); userinfo overlays non-empty fields.
+    const claims = mergeOidcClaims(idClaims, userInfoClaims);
     if (!claims?.sub) {
       return redirectLoginError(
         'Could not determine user identity from OIDC provider'

@@ -4,6 +4,7 @@ import {
   formatRelativeTime,
   formatDate,
   formatDateShort,
+  resolveUserDisplayName,
 } from '@/lib/format';
 
 describe('formatBytes', () => {
@@ -105,5 +106,53 @@ describe('formatDateShort', () => {
     const result = formatDateShort('2026-01-15T12:00:00Z');
     expect(result).toBeTruthy();
     expect(result).not.toBe('—');
+  });
+});
+
+describe('resolveUserDisplayName', () => {
+  const uuid = '550e8400-e29b-41d4-a716-446655440000';
+
+  it('returns username when it differs from id', () => {
+    expect(
+      resolveUserDisplayName({
+        id: uuid,
+        username: 'alice',
+        email: 'alice@example.com',
+        name: 'Alice',
+      })
+    ).toBe('alice');
+  });
+
+  it('falls back to email local-part when username equals id', () => {
+    expect(
+      resolveUserDisplayName({
+        id: uuid,
+        username: uuid,
+        email: 'alice@example.com',
+        name: 'Alice',
+      })
+    ).toBe('alice');
+  });
+
+  it('falls back to name when username equals id and no email', () => {
+    expect(
+      resolveUserDisplayName({
+        id: uuid,
+        username: uuid,
+        email: null,
+        name: 'Alice Example',
+      })
+    ).toBe('Alice Example');
+  });
+
+  it('returns id when nothing else is available', () => {
+    expect(
+      resolveUserDisplayName({
+        id: uuid,
+        username: uuid,
+        email: null,
+        name: null,
+      })
+    ).toBe(uuid);
   });
 });

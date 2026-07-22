@@ -6,6 +6,27 @@ export function formatBytes(bytes: number | null | undefined): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
+/**
+ * Display label when `username` may equal OIDC `sub` (often a UUID) because
+ * profile claims were missing at login. Prefer email local-part or name.
+ */
+export function resolveUserDisplayName(user: {
+  id: string;
+  username: string;
+  email?: string | null;
+  name?: string | null;
+}): string {
+  if (user.username && user.username !== user.id) return user.username;
+  if (user.email?.trim()) {
+    const local = user.email.includes('@')
+      ? user.email.split('@')[0]
+      : user.email;
+    if (local?.trim()) return local.trim();
+  }
+  if (user.name?.trim()) return user.name.trim();
+  return user.username || user.id;
+}
+
 export function formatDiskSize(mb: number): string {
   if (mb >= 1024 * 1024) {
     return (mb / (1024 * 1024)).toFixed(1) + ' TB';

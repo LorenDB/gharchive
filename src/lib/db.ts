@@ -6,6 +6,7 @@ import {
   tryGetUserId,
 } from '@/lib/user-context';
 import type { SessionUser } from '@/lib/session';
+import { resolveUserDisplayName } from '@/lib/format';
 
 function getDataDir(): string {
   return process.env.DATA_DIR || path.join(process.cwd(), 'data');
@@ -1371,7 +1372,9 @@ export function listUsersWithUsage(): UserUsageSummary[] {
     const app = appUsers.get(id);
     summaries.push({
       id,
-      username: app?.username || id,
+      username: app
+        ? resolveUserDisplayName(app)
+        : id,
       email: app?.email ?? null,
       name: app?.name ?? null,
       created_at: app?.created_at ?? null,

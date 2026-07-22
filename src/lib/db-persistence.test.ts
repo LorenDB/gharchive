@@ -284,6 +284,25 @@ describe('listUsersWithUsage', () => {
     expect(bobDetail.other_repo_count).toBe(0);
   });
 
+  it('resolves display username when stored username equals OIDC sub', () => {
+    const uuid = '550e8400-e29b-41d4-a716-446655440000';
+    ensureAppUser({
+      id: uuid,
+      username: uuid,
+      email: 'sso-user@example.com',
+      name: 'SSO User',
+      role: 'user',
+      groups: [],
+    });
+
+    const users = listUsersWithUsage();
+    const row = users.find((u) => u.id === uuid);
+    expect(row).toBeTruthy();
+    expect(row!.username).toBe('sso-user');
+    expect(row!.email).toBe('sso-user@example.com');
+    expect(row!.name).toBe('SSO User');
+  });
+
   it('limits largest_repos and rolls the rest into other_bytes', () => {
     const sizes = [5000, 4000, 3000, 2000, 1000, 500];
     for (let i = 0; i < sizes.length; i++) {

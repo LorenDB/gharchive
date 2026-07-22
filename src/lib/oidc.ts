@@ -35,6 +35,8 @@ export interface OidcClaims {
   email_verified?: boolean;
   name?: string;
   preferred_username?: string;
+  /** Some IdPs (custom mappers) expose this instead of preferred_username */
+  username?: string;
   given_name?: string;
   family_name?: string;
   nickname?: string;
@@ -268,12 +270,76 @@ export function getOidcProviderName(): string {
   return process.env.OIDC_PROVIDER_NAME?.trim() || 'SSO';
 }
 
+/** True when a claim value is usable (non-empty string / non-empty array). */
+function hasClaimValue(value: unknown): boolean {
+  if (value == null) return false;
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  return true;
+}
+
+/**
+ * Merge OIDC claim sources (typically validated id_token + userinfo).
+ *
+ * Overlay wins on non-empty fields so userinfo can update profile data, but a
+ * sparse userinfo response (e.g. only `sub`) does not wipe preferred_username /
+ * email / name / groups that only appear on the id_token.
+ *
+ * On `sub` mismatch, prefer the base (usually nonce-validated id_token).
+ */
+export function mergeOidcClaims(
+  base: OidcClaims | null | undefined,
+  overlay: OidcClaims | null | undefined
+): OidcClaims | null {
+  if (!base && !overlay) return null;
+  if (!base) return { ...overlay! };
+  if (!overlay) return { ...base };
+
+  const merged: OidcClaims = { ...base };
+
+  const keys = Object.keys(overlay) as (keyof OidcClaims)[];
+  for (const key of keys) {
+    if (key === 'sub') continue;
+    const value = overlay[key];
+    if (!hasClaimValue(value)) continue;
+    Object.assign(merged, { [key]: value });
+  }
+
+  if (base.sub && overlay.sub && base.sub !== overlay.sub) {
+    console.error(
+      '[oidc] sub mismatch between claim sources:',
+      base.sub,
+      'vs',
+      overlay.sub,
+      '— keeping base sub'
+    );
+    merged.sub = base.sub;
+  } else {
+    merged.sub = overlay.sub || base.sub;
+  }
+
+  return merged;
+}
+
+/**
+ * Pick a human-readable username from OIDC claims.
+ * Falls back to `sub` only when no profile/email identity is available
+ * (often a UUID — callers may want display fallbacks in that case).
+ */
 export function claimsToUsername(claims: OidcClaims): string {
-  return (
-    claims.preferred_username ||
-    claims.nickname ||
-    claims.email?.split('@')[0] ||
-    claims.name ||
-    claims.sub
-  );
+  const emailLocal = claims.email?.includes('@')
+    ? claims.email.split('@')[0]
+    : claims.email;
+  const candidates = [
+    claims.preferred_username,
+    claims.username,
+    claims.nickname,
+    emailLocal,
+    claims.name,
+    claims.given_name,
+  ];
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim()) return c.trim();
+  }
+  return claims.sub;
 }

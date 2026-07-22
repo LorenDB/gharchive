@@ -12,9 +12,24 @@ const links = [
 ];
 
 export interface NavbarUser {
+  id?: string;
   username: string;
   name: string | null;
   email: string | null;
+}
+
+function navbarDisplayName(user: NavbarUser): string {
+  if (user.username && (!user.id || user.username !== user.id)) {
+    return user.username;
+  }
+  if (user.email?.trim()) {
+    const local = user.email.includes('@')
+      ? user.email.split('@')[0]
+      : user.email;
+    if (local?.trim()) return local.trim();
+  }
+  if (user.name?.trim()) return user.name.trim();
+  return user.username || 'admin';
 }
 
 export default function Navbar({
@@ -25,7 +40,7 @@ export default function Navbar({
   showLogout?: boolean;
 }) {
   const pathname = usePathname();
-  const displayName = user?.username || 'admin';
+  const displayName = user ? navbarDisplayName(user) : 'admin';
   const [menuOpen, setMenuOpen] = useState(false);
   const menuId = useId();
   const menuRef = useRef<HTMLDivElement>(null);
