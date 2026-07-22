@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import Link from 'next/link';
+import { languageColor } from '@/lib/language-colors';
 
 interface Star {
   full_name: string;
@@ -394,7 +395,8 @@ export default function ImportStarsPage() {
                               <span className="badge-muted">private</span>
                             )}
                             {s.language && (
-                              <span className="text-[11px] text-ink-500">
+                              <span className="inline-flex items-center gap-1 text-[11px] text-ink-500">
+                                <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: languageColor(s.language) }} />
                                 {s.language}
                               </span>
                             )}

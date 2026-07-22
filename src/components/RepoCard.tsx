@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { formatRelativeTime } from '@/lib/format';
+import { languageColor } from '@/lib/language-colors';
 
 interface ListBadge {
   id: number;
@@ -92,7 +93,7 @@ export default function RepoCard({ repo }: { repo: Repo }) {
         <div className="flex flex-wrap items-center gap-1.5 mt-2.5">
           {repo.language && (
             <span className="inline-flex items-center gap-1 text-[10px] text-ink-500">
-              <span className="h-1.5 w-1.5 rounded-full bg-mint-400" />
+              <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: languageColor(repo.language!) }} />
               {repo.language}
             </span>
           )}

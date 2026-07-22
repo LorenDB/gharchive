@@ -7,6 +7,7 @@ import ReleasesViewer from '@/components/ReleasesViewer';
 import ReadmePanel from '@/components/ReadmePanel';
 import LocalDescriptionEditor from '@/components/LocalDescriptionEditor';
 import { formatBytes, formatDate, formatRelativeTime } from '@/lib/format';
+import { languageColor } from '@/lib/language-colors';
 
 type Tab = 'overview' | 'code' | 'releases' | 'activity';
 
@@ -200,7 +201,7 @@ export default function RepoDetail() {
           <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-ink-500">
             {repo.language && (
               <span className="inline-flex items-center gap-1.5">
-                <span className="h-2 w-2 rounded-full bg-mint-400" />
+                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: languageColor(repo.language) }} />
                 {repo.language}
               </span>
             )}
