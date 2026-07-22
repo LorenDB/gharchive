@@ -7,7 +7,8 @@ server. After code changes, assume they will restart or hot-reload as needed.
 
 You may still run:
 
-- `npx tsc --noEmit` for typechecks (only verification tool — no linter, no formatter, no tests)
+- `npx tsc --noEmit` for typechecks
+- `npm test` (vitest) for unit tests under `src/**/*.test.ts`
 - one-off `curl` against a server **if the user already has it running**
 - builds only when explicitly asked
 
@@ -19,7 +20,8 @@ You may still run:
 - No real database — all state in `data/db.json` (JSON file, in-memory cache + sync-on-write)
 - Multi-user data isolation via `AsyncLocalStorage` (`user-context.ts`). API routes use `withApiUser()` wrapper to set the user context.
 - `data/` is gitignored. Default `DATA_DIR = ./data`; contains `db.json`, `mirrors/`, `releases/`
-- Local JSON schema versioning (`SCHEMA_VERSION = 2`) with migration in `db.ts:migrate()`
+- Local JSON schema versioning (`SCHEMA_VERSION = 3`) with migration in `db.ts:migrate()`
+- **Repo dedup:** public archives are shared; private are per-user. See below.
 
 ## Auth / OIDC
 
@@ -27,15 +29,24 @@ You may still run:
 - Optional: `OIDC_CLIENT_SECRET`, `OIDC_SCOPES`, `OIDC_REDIRECT_URI`
 - See `.env.example`. Routes: `/login`, `/api/auth/{login,callback,logout,me}`
 - No SSO → autologin as admin; `AuthWarningBanner` at top of every page
-- Multi-user: each SSO user has isolated repos/lists/settings/GitHub account
+- Multi-user: each SSO user has isolated memberships/lists/settings/GitHub account
 - First SSO login claims legacy no-auth (`autologin`) data (`legacy_claimed_by`)
 - Docker: entrypoint chowns `/data` to uid 1001 so bind mounts are writable
 - Always set `APP_URL` to the browser-facing origin (not the container id)
 - Session cookies: HMAC-SHA256 signed, 7-day expiry, base64url(payload).base64url(sig)
 
-## Git mirrors
+## Git mirrors & archive dedup
 
-- Bare mirrors under `data/mirrors/`. Autologin: `{platform}/{owner}/{name}.git`. SSO: `users/{userId}/{platform}/...`
+- Shared **archives** (`archives[]` in `db.json`) hold `mirror_path`, remote meta, `last_synced_at`
+- User **memberships** (`repos[]`) link `owner_id` → `archive_id`; user-facing `/repos/[id]` is membership id
+- **Public:** one archive per `(platform, owner, name)`; path `mirrors/{platform}/{owner}/{name}.git`
+- **Private:** never shared; path `mirrors/users/{userId}/{platform}/{owner}/{name}.git`
+- Release assets: public under `releases/{platform}/...`; private under `releases/users/{userId}/...`
+- Releases/assets rows key by `archive_id` (shared). Sync logs stay per membership.
+- Add: if public archive exists → link membership only (no re-clone). Else clone once.
+- Delete: unlink membership; physical delete (mirror + assets) only when last member leaves
+- `cloneMirror` reuses an existing bare repo (never `rm -rf` shared paths)
+- `withMirrorLock` serializes concurrent fetch on the same path
 - `src/lib/git.ts` wraps raw `git` CLI via `child_process.exec`. No libgit2/nodegit.
 - GC is disabled (`gc.auto 0`, `gc.pruneExpire never`) to preserve history snapshots.
 - Pre-fetch refs are snapshotted to `refs/archive/{timestamp}/` before each `git fetch`.
@@ -44,7 +55,8 @@ You may still run:
 ## Scheduler & memory awareness
 
 - In-process scheduler (`scheduler.ts`): starts 15s after boot, ticks every 60s.
-- Per-user tick: checks due repos based on `sync_interval_hours`, scans GitHub stars/owned.
+- Per-user tick: checks due memberships based on `sync_interval_hours`, scans GitHub stars/owned.
+- Shared public archives are synced at most once per tick (first due member wins).
 - Memory-aware: `hasEnoughMemory()` checks free memory/cgroup limit before starting sync jobs. Low memory defers work.
 - Alerts (`storage_low`, `memory_low`) fire on system health ticks.
 

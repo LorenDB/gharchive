@@ -7,8 +7,13 @@ import {
 } from '@/lib/user-context';
 import type { SessionUser } from '@/lib/session';
 
-const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
-const DB_PATH = path.join(DATA_DIR, 'db.json');
+function getDataDir(): string {
+  return process.env.DATA_DIR || path.join(process.cwd(), 'data');
+}
+
+function getDbPath(): string {
+  return path.join(getDataDir(), 'db.json');
+}
 
 export interface Settings {
   auto_sync_enabled: boolean;
@@ -160,10 +165,57 @@ export interface RepoList {
   list_id: number;
 }
 
+/** Shared on-disk content for a (platform, owner, name) identity. */
+export interface Archive {
+  id: number;
+  platform: 'github' | 'gitlab';
+  owner: string;
+  name: string;
+  clone_url: string;
+  mirror_path: string;
+  last_synced_at: string | null;
+  /**
+   * Private archives are never shared across users. Public ones may have
+   * multiple memberships pointing at the same archive.
+   */
+  is_private?: boolean;
+
+  // ── Cached remote metadata (refreshed on sync) ────────────────
+  remote_description?: string | null;
+  topics?: string[];
+  language?: string | null;
+  homepage?: string | null;
+  stargazers_count?: number | null;
+  forks_count?: number | null;
+  license?: string | null;
+  is_archived?: boolean;
+  is_fork?: boolean;
+  remote_updated_at?: string | null;
+  remote_meta_synced_at?: string | null;
+}
+
+/**
+ * User membership row (persisted). Hydrated with archive fields for the
+ * public `Repo` view returned by getDb / getRepoById.
+ */
+interface RepoMembership {
+  id: number;
+  owner_id: string;
+  archive_id: number;
+  created_at: string;
+  from_star?: boolean;
+  from_owned?: boolean;
+  local_description?: string | null;
+}
+
+/**
+ * Hydrated user-facing repository: membership + shared archive fields.
+ * API routes and UI continue to use this shape; `id` is the membership id.
+ */
 export interface Repo {
   id: number;
-  /** Owning app user id (OIDC sub or autologin) */
   owner_id: string;
+  archive_id: number;
   platform: 'github' | 'gitlab';
   owner: string;
   name: string;
@@ -171,40 +223,27 @@ export interface Repo {
   mirror_path: string;
   last_synced_at: string | null;
   created_at: string;
-  /** True if added via GitHub stars import */
   from_star?: boolean;
-  /** True if added via owned-repos import */
   from_owned?: boolean;
-
-  /**
-   * User-authored notes for why this repo is archived (local only;
-   * separate from remote_description scraped from GitHub/GitLab).
-   */
   local_description?: string | null;
-
-  // ── Cached remote metadata (refreshed on sync) ────────────────
-  /** Description from the hosting platform */
   remote_description?: string | null;
-  /** Topics / tags from the hosting platform */
   topics?: string[];
   language?: string | null;
   homepage?: string | null;
   stargazers_count?: number | null;
   forks_count?: number | null;
-  /** SPDX id or license name when available */
   license?: string | null;
   is_private?: boolean;
   is_archived?: boolean;
   is_fork?: boolean;
-  /** Last activity timestamp reported by the remote */
   remote_updated_at?: string | null;
-  /** When remote metadata was last scraped */
   remote_meta_synced_at?: string | null;
 }
 
 interface Release {
   id: number;
-  repo_id: number;
+  /** Shared archive this release belongs to */
+  archive_id: number;
   tag_name: string;
   name: string | null;
   body: string | null;
@@ -225,6 +264,7 @@ interface ReleaseAsset {
 
 interface SyncLog {
   id: number;
+  /** Membership (user-facing repo) id */
   repo_id: number;
   status: 'success' | 'failed';
   message: string | null;
@@ -232,7 +272,7 @@ interface SyncLog {
 }
 
 interface Data {
-  /** Schema marker for multi-user support */
+  /** Schema marker for multi-user + archive dedup */
   schema_version: number;
   users: AppUser[];
   /**
@@ -240,7 +280,9 @@ interface Data {
    * null until the first SSO login claims it.
    */
   legacy_claimed_by: string | null;
-  repos: Repo[];
+  archives: Archive[];
+  /** User memberships (persisted as RepoMembership; hydrated on read) */
+  repos: RepoMembership[];
   releases: Release[];
   release_assets: ReleaseAsset[];
   sync_logs: SyncLog[];
@@ -268,13 +310,381 @@ export const LIST_COLORS = [
   '#f472b6', // pink
 ];
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 let data: Data | null = null;
 let nextIds: Record<string, number> = {};
 
 function isLegacyOwner(ownerId: string | undefined | null): boolean {
   return !ownerId || ownerId === AUTOLOGIN_USER_ID;
+}
+
+function identityKey(
+  platform: string,
+  owner: string,
+  name: string
+): string {
+  return `${platform}\0${owner.toLowerCase()}\0${name.toLowerCase()}`;
+}
+
+function hydrateRepo(m: RepoMembership, archive: Archive | undefined): Repo {
+  if (!archive) {
+    // Orphan membership — surface minimal row so callers can still detect it
+    return {
+      id: m.id,
+      owner_id: m.owner_id,
+      archive_id: m.archive_id,
+      platform: 'github',
+      owner: '?',
+      name: '?',
+      clone_url: '',
+      mirror_path: '',
+      last_synced_at: null,
+      created_at: m.created_at,
+      from_star: m.from_star,
+      from_owned: m.from_owned,
+      local_description: m.local_description ?? null,
+    };
+  }
+  return {
+    id: m.id,
+    owner_id: m.owner_id,
+    archive_id: m.archive_id,
+    platform: archive.platform,
+    owner: archive.owner,
+    name: archive.name,
+    clone_url: archive.clone_url,
+    mirror_path: archive.mirror_path,
+    last_synced_at: archive.last_synced_at,
+    created_at: m.created_at,
+    from_star: m.from_star,
+    from_owned: m.from_owned,
+    local_description: m.local_description ?? null,
+    remote_description: archive.remote_description ?? null,
+    topics: archive.topics ?? [],
+    language: archive.language ?? null,
+    homepage: archive.homepage ?? null,
+    stargazers_count: archive.stargazers_count ?? null,
+    forks_count: archive.forks_count ?? null,
+    license: archive.license ?? null,
+    is_private: Boolean(archive.is_private),
+    is_archived: Boolean(archive.is_archived),
+    is_fork: Boolean(archive.is_fork),
+    remote_updated_at: archive.remote_updated_at ?? null,
+    remote_meta_synced_at: archive.remote_meta_synced_at ?? null,
+  };
+}
+
+function archiveById(d: Data, id: number): Archive | undefined {
+  return d.archives.find((a) => a.id === id);
+}
+
+/** Best-effort recursive directory size for migration ranking. */
+function dirSizeSafe(dirPath: string): number {
+  try {
+    if (!fs.existsSync(dirPath)) return 0;
+    let total = 0;
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) total += dirSizeSafe(full);
+      else total += fs.statSync(full).size;
+    }
+    return total;
+  } catch {
+    return 0;
+  }
+}
+
+function parseTimeMs(iso: string | null | undefined): number {
+  if (!iso) return 0;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? t : 0;
+}
+
+/**
+ * Migrate schema v1/v2 flat repos into archives + memberships.
+ * - Public identity groups with multiple users → one shared archive.
+ * - Private (or mixed) groups → one archive per former row (no share).
+ */
+function migrateToArchives(d: Data): void {
+  if (Array.isArray(d.archives) && d.archives.length > 0) {
+    // Already migrated or partially present
+    return;
+  }
+  if (!Array.isArray(d.archives)) d.archives = [];
+
+  // Legacy shape: repos held full fields + optional missing archive_id
+  type LegacyRepo = RepoMembership &
+    Partial<Archive> & {
+      platform?: 'github' | 'gitlab';
+      owner?: string;
+      name?: string;
+      clone_url?: string;
+      mirror_path?: string;
+      last_synced_at?: string | null;
+      is_private?: boolean;
+    };
+
+  const legacyRepos = d.repos as unknown as LegacyRepo[];
+  if (legacyRepos.length === 0) return;
+
+  // Already membership-only rows with archive_id and empty archives is corrupt;
+  // only run when rows still look like full repos.
+  const looksLegacy = legacyRepos.some(
+    (r) => r.platform && r.owner && r.name && r.mirror_path && !r.archive_id
+  );
+  if (!looksLegacy && legacyRepos.every((r) => r.archive_id)) {
+    return;
+  }
+
+  // Group by identity
+  const groups = new Map<string, LegacyRepo[]>();
+  for (const r of legacyRepos) {
+    if (!r.platform || !r.owner || !r.name) continue;
+    const key = identityKey(r.platform, r.owner, r.name);
+    const list = groups.get(key) || [];
+    list.push(r);
+    groups.set(key, list);
+  }
+
+  const newArchives: Archive[] = [];
+  const newMemberships: RepoMembership[] = [];
+  let nextArchiveId =
+    d.archives.reduce((max, a) => Math.max(max, a.id), 0) + 1;
+
+  // Map old repo id → archive id for release rekey
+  const oldRepoToArchive = new Map<number, number>();
+
+  for (const [, group] of groups) {
+    const anyPrivate = group.some((r) => Boolean(r.is_private));
+    // Safer: if any is private, do not merge across users
+    const canShare = !anyPrivate && group.length >= 1;
+
+    if (canShare && group.every((r) => !r.is_private)) {
+      // Prefer largest existing mirror / most recently synced as canonical
+      const ranked = [...group].sort((a, b) => {
+        const sizeDiff =
+          dirSizeSafe(b.mirror_path || '') - dirSizeSafe(a.mirror_path || '');
+        if (sizeDiff !== 0) return sizeDiff;
+        return (
+          parseTimeMs(b.last_synced_at) - parseTimeMs(a.last_synced_at)
+        );
+      });
+      const primary = ranked[0];
+      const archiveId = nextArchiveId++;
+      const archive: Archive = {
+        id: archiveId,
+        platform: primary.platform!,
+        owner: primary.owner!,
+        name: primary.name!,
+        clone_url: primary.clone_url || '',
+        mirror_path: primary.mirror_path || '',
+        last_synced_at: primary.last_synced_at ?? null,
+        is_private: false,
+        remote_description: primary.remote_description ?? null,
+        topics: primary.topics ?? [],
+        language: primary.language ?? null,
+        homepage: primary.homepage ?? null,
+        stargazers_count: primary.stargazers_count ?? null,
+        forks_count: primary.forks_count ?? null,
+        license: primary.license ?? null,
+        is_archived: primary.is_archived,
+        is_fork: primary.is_fork,
+        remote_updated_at: primary.remote_updated_at ?? null,
+        remote_meta_synced_at: primary.remote_meta_synced_at ?? null,
+      };
+      // Prefer richest remote meta across group
+      for (const r of ranked.slice(1)) {
+        if (!archive.remote_description && r.remote_description) {
+          archive.remote_description = r.remote_description;
+        }
+        if (
+          (!archive.topics || archive.topics.length === 0) &&
+          r.topics?.length
+        ) {
+          archive.topics = r.topics;
+        }
+        if (
+          parseTimeMs(r.last_synced_at) > parseTimeMs(archive.last_synced_at)
+        ) {
+          archive.last_synced_at = r.last_synced_at ?? null;
+        }
+        if (
+          parseTimeMs(r.remote_meta_synced_at) >
+          parseTimeMs(archive.remote_meta_synced_at)
+        ) {
+          archive.remote_meta_synced_at = r.remote_meta_synced_at ?? null;
+          archive.remote_description =
+            r.remote_description ?? archive.remote_description;
+          archive.topics = r.topics ?? archive.topics;
+          archive.language = r.language ?? archive.language;
+          archive.homepage = r.homepage ?? archive.homepage;
+          archive.stargazers_count =
+            r.stargazers_count ?? archive.stargazers_count;
+          archive.forks_count = r.forks_count ?? archive.forks_count;
+          archive.license = r.license ?? archive.license;
+          archive.is_archived = r.is_archived ?? archive.is_archived;
+          archive.is_fork = r.is_fork ?? archive.is_fork;
+          archive.remote_updated_at =
+            r.remote_updated_at ?? archive.remote_updated_at;
+        }
+      }
+      // Prefer canonical shared path layout when possible
+      const sharedPath = path.join(
+        getDataDir(),
+        'mirrors',
+        primary.platform!,
+        primary.owner!,
+        primary.name! + '.git'
+      );
+      if (
+        archive.mirror_path &&
+        path.resolve(archive.mirror_path) !== path.resolve(sharedPath)
+      ) {
+        try {
+          if (
+            fs.existsSync(archive.mirror_path) &&
+            !fs.existsSync(sharedPath)
+          ) {
+            fs.mkdirSync(path.dirname(sharedPath), { recursive: true });
+            fs.renameSync(archive.mirror_path, sharedPath);
+            archive.mirror_path = sharedPath;
+          } else if (fs.existsSync(sharedPath)) {
+            // Shared path already has content — drop the user-scoped extra
+            if (fs.existsSync(archive.mirror_path)) {
+              fs.rmSync(archive.mirror_path, { recursive: true, force: true });
+            }
+            archive.mirror_path = sharedPath;
+          }
+        } catch {
+          // keep primary path if move fails
+        }
+      }
+
+      newArchives.push(archive);
+
+      // Drop duplicate on-disk mirrors for non-primary members
+      for (const r of ranked.slice(1)) {
+        if (
+          r.mirror_path &&
+          path.resolve(r.mirror_path) !== path.resolve(archive.mirror_path) &&
+          fs.existsSync(r.mirror_path)
+        ) {
+          try {
+            fs.rmSync(r.mirror_path, { recursive: true, force: true });
+          } catch {
+            // best-effort
+          }
+        }
+      }
+
+      for (const r of group) {
+        oldRepoToArchive.set(r.id, archiveId);
+        newMemberships.push({
+          id: r.id,
+          owner_id: r.owner_id || AUTOLOGIN_USER_ID,
+          archive_id: archiveId,
+          created_at: r.created_at || new Date().toISOString(),
+          from_star: r.from_star,
+          from_owned: r.from_owned,
+          local_description: r.local_description ?? null,
+        });
+      }
+    } else {
+      // One archive per membership (private isolation)
+      for (const r of group) {
+        const archiveId = nextArchiveId++;
+        newArchives.push({
+          id: archiveId,
+          platform: r.platform!,
+          owner: r.owner!,
+          name: r.name!,
+          clone_url: r.clone_url || '',
+          mirror_path: r.mirror_path || '',
+          last_synced_at: r.last_synced_at ?? null,
+          is_private: Boolean(r.is_private),
+          remote_description: r.remote_description ?? null,
+          topics: r.topics ?? [],
+          language: r.language ?? null,
+          homepage: r.homepage ?? null,
+          stargazers_count: r.stargazers_count ?? null,
+          forks_count: r.forks_count ?? null,
+          license: r.license ?? null,
+          is_archived: r.is_archived,
+          is_fork: r.is_fork,
+          remote_updated_at: r.remote_updated_at ?? null,
+          remote_meta_synced_at: r.remote_meta_synced_at ?? null,
+        });
+        oldRepoToArchive.set(r.id, archiveId);
+        newMemberships.push({
+          id: r.id,
+          owner_id: r.owner_id || AUTOLOGIN_USER_ID,
+          archive_id: archiveId,
+          created_at: r.created_at || new Date().toISOString(),
+          from_star: r.from_star,
+          from_owned: r.from_owned,
+          local_description: r.local_description ?? null,
+        });
+      }
+    }
+  }
+
+  d.archives = newArchives;
+  d.repos = newMemberships;
+
+  // Rekey releases: repo_id → archive_id; merge duplicates when sharing
+  type LegacyRelease = Release & { repo_id?: number; archive_id?: number };
+  const legacyReleases = (d.releases || []) as LegacyRelease[];
+  const assetsByRelease = new Map<number, ReleaseAsset[]>();
+  for (const a of d.release_assets || []) {
+    const list = assetsByRelease.get(a.release_id) || [];
+    list.push(a);
+    assetsByRelease.set(a.release_id, list);
+  }
+
+  // Group releases by (archive_id, tag_name); keep richest
+  const releaseKey = (archiveId: number, tag: string) =>
+    `${archiveId}\0${tag}`;
+  const bestRelease = new Map<
+    string,
+    { release: Release; oldId: number; assetScore: number }
+  >();
+
+  for (const rel of legacyReleases) {
+    const oldRepoId = rel.repo_id ?? rel.archive_id;
+    if (oldRepoId == null) continue;
+    const archiveId = oldRepoToArchive.get(oldRepoId) ?? rel.archive_id;
+    if (archiveId == null) continue;
+    const assets = assetsByRelease.get(rel.id) || [];
+    const score =
+      assets.length + assets.filter((a) => a.file_path).length * 10;
+    const key = releaseKey(archiveId, rel.tag_name);
+    const prev = bestRelease.get(key);
+    if (!prev || score > prev.assetScore) {
+      bestRelease.set(key, {
+        release: {
+          id: rel.id,
+          archive_id: archiveId,
+          tag_name: rel.tag_name,
+          name: rel.name,
+          body: rel.body,
+          published_at: rel.published_at,
+          created_at: rel.created_at,
+        },
+        oldId: rel.id,
+        assetScore: score,
+      });
+    }
+  }
+
+  const keptOldReleaseIds = new Set(
+    [...bestRelease.values()].map((v) => v.oldId)
+  );
+  d.releases = [...bestRelease.values()].map((v) => v.release);
+  d.release_assets = (d.release_assets || []).filter((a) =>
+    keptOldReleaseIds.has(a.release_id)
+  );
 }
 
 function migrate(raw: Record<string, unknown>): Data {
@@ -290,6 +700,7 @@ function migrate(raw: Record<string, unknown>): Data {
     'sync_logs',
     'lists',
     'repo_lists',
+    'archives',
   ] as const) {
     if (!Array.isArray((d as any)[key])) (d as any)[key] = [];
   }
@@ -316,11 +727,28 @@ function migrate(raw: Record<string, unknown>): Data {
   delete d.github_account;
 
   // owner_id on repos / lists
-  for (const r of d.repos) {
+  for (const r of d.repos as RepoMembership[]) {
     if (!r.owner_id) r.owner_id = AUTOLOGIN_USER_ID;
   }
   for (const l of d.lists) {
     if (!l.owner_id) l.owner_id = AUTOLOGIN_USER_ID;
+  }
+
+  // v2 → v3: split archives / memberships; rekey releases
+  if ((d.schema_version || 0) < 3 || !d.archives?.length) {
+    // Only migrate when repos still look legacy OR archives empty with legacy fields
+    migrateToArchives(d);
+  }
+
+  // Normalize release rows that still use repo_id
+  for (const rel of d.releases as (Release & { repo_id?: number })[]) {
+    if (rel.archive_id == null && (rel as any).repo_id != null) {
+      // Try membership id → archive_id
+      const m = d.repos.find((r) => r.id === (rel as any).repo_id);
+      if (m) rel.archive_id = m.archive_id;
+      else rel.archive_id = (rel as any).repo_id;
+    }
+    delete (rel as any).repo_id;
   }
 
   d.schema_version = SCHEMA_VERSION;
@@ -329,18 +757,27 @@ function migrate(raw: Record<string, unknown>): Data {
 
 function load(): Data {
   if (data) return data;
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+  const dataDir = getDataDir();
+  const dbPath = getDbPath();
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
   }
-  if (fs.existsSync(DB_PATH)) {
-    const raw = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+  if (fs.existsSync(dbPath)) {
+    const raw = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+    const prevVersion = Number(raw.schema_version) || 0;
     data = migrate(raw);
+    // Persist when schema advanced (or first load still missing archives)
+    if (prevVersion < SCHEMA_VERSION) {
+      save();
+    }
   } else {
     data = emptyData();
   }
   const d = data!;
 
   nextIds.repos = d.repos.reduce((max, r) => Math.max(max, r.id), 0) + 1;
+  nextIds.archives =
+    d.archives.reduce((max, a) => Math.max(max, a.id), 0) + 1;
   nextIds.releases = d.releases.reduce((max, r) => Math.max(max, r.id), 0) + 1;
   nextIds.release_assets =
     d.release_assets.reduce((max, r) => Math.max(max, r.id), 0) + 1;
@@ -349,11 +786,21 @@ function load(): Data {
   return d;
 }
 
+/**
+ * Clear in-memory cache so the next load() re-reads DATA_DIR/db.json.
+ * Intended for unit tests only.
+ */
+export function resetDbForTests(): void {
+  data = null;
+  nextIds = {};
+}
+
 function emptyData(): Data {
   return {
     schema_version: SCHEMA_VERSION,
     users: [],
     legacy_claimed_by: null,
+    archives: [],
     repos: [],
     releases: [],
     release_assets: [],
@@ -367,7 +814,10 @@ function emptyData(): Data {
 
 function save() {
   if (data) {
-    fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
+    const dbPath = getDbPath();
+    const dir = path.dirname(dbPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(dbPath, JSON.stringify(data, null, 2));
   }
 }
 
@@ -375,12 +825,19 @@ function uid(): string {
   return getRequiredUserId();
 }
 
-function ownedRepos(userId: string): Repo[] {
+function ownedMemberships(userId: string): RepoMembership[] {
   return load().repos.filter((r) => r.owner_id === userId);
 }
 
 function ownedLists(userId: string): List[] {
   return load().lists.filter((l) => l.owner_id === userId);
+}
+
+function hydrateOwned(userId: string): Repo[] {
+  const d = load();
+  return ownedMemberships(userId).map((m) =>
+    hydrateRepo(m, archiveById(d, m.archive_id))
+  );
 }
 
 // ── Users / legacy claim ────────────────────────────────────────
@@ -409,7 +866,6 @@ export function ensureAppUser(session: SessionUser): {
     };
     data!.users.push(user);
 
-    // First SSO user (not the synthetic autologin id) inherits legacy data
     if (
       session.id !== AUTOLOGIN_USER_ID &&
       data!.legacy_claimed_by == null
@@ -425,7 +881,6 @@ export function ensureAppUser(session: SessionUser): {
     user.last_login_at = now;
   }
 
-  // Ensure settings bucket exists
   if (!data!.settings_by_user[session.id]) {
     data!.settings_by_user[session.id] = { ...DEFAULT_SETTINGS };
   }
@@ -479,7 +934,6 @@ export function listUserIds(): string[] {
   for (const l of d.lists) ids.add(l.owner_id);
   for (const k of Object.keys(d.settings_by_user)) ids.add(k);
   for (const k of Object.keys(d.github_accounts)) ids.add(k);
-  // Always include autologin if any legacy remains
   if (d.repos.some((r) => isLegacyOwner(r.owner_id))) {
     ids.add(AUTOLOGIN_USER_ID);
   }
@@ -492,13 +946,16 @@ export function listUserIds(): string[] {
 export function getDb() {
   const userId = uid();
   const d = load();
-  const repos = ownedRepos(userId);
+  const repos = hydrateOwned(userId);
+  const archiveIds = new Set(repos.map((r) => r.archive_id));
   const repoIds = new Set(repos.map((r) => r.id));
   return {
     repos,
-    releases: d.releases.filter((r) => repoIds.has(r.repo_id)),
+    releases: d.releases.filter((r) => archiveIds.has(r.archive_id)),
     releaseAssets: d.release_assets.filter((a) =>
-      d.releases.some((r) => r.id === a.release_id && repoIds.has(r.repo_id))
+      d.releases.some(
+        (r) => r.id === a.release_id && archiveIds.has(r.archive_id)
+      )
     ),
     syncLogs: d.sync_logs.filter((l) => repoIds.has(l.repo_id)),
     settings: getSettings(),
@@ -618,54 +1075,45 @@ export function getGithubToken(): string | undefined {
   return process.env.GITHUB_TOKEN || undefined;
 }
 
-// ── Repos ───────────────────────────────────────────────────────
+// ── Archives ────────────────────────────────────────────────────
 
-export function addRepo(
-  repo: Omit<Repo, 'id' | 'created_at' | 'owner_id'> & {
-    from_star?: boolean;
-    owner_id?: string;
-  }
-): Repo {
-  load();
-  const now = new Date().toISOString();
-  const newRepo: Repo = {
-    ...repo,
-    owner_id: repo.owner_id || uid(),
-    id: nextIds.repos++,
-    created_at: now,
-  };
-  data!.repos.push(newRepo);
-  save();
-  return newRepo;
+export function getArchiveById(id: number): Archive | undefined {
+  return load().archives.find((a) => a.id === id);
 }
 
-export function findRepo(
+/** Global public archive lookup (never returns private archives). */
+export function findPublicArchive(
   platform: string,
   owner: string,
   name: string
-): Repo | undefined {
-  const userId = uid();
-  return load().repos.find(
-    (r) =>
-      r.owner_id === userId &&
-      r.platform === platform &&
-      r.owner === owner &&
-      r.name === name
+): Archive | undefined {
+  const key = identityKey(platform, owner, name);
+  return load().archives.find(
+    (a) =>
+      !a.is_private &&
+      identityKey(a.platform, a.owner, a.name) === key
   );
 }
 
-export function getRepoById(id: number): Repo | undefined {
-  const userId = uid();
-  return load().repos.find((r) => r.id === id && r.owner_id === userId);
+export function countArchiveMembers(archiveId: number): number {
+  return load().repos.filter((r) => r.archive_id === archiveId).length;
 }
 
-export type RepoUpdatableFields = Partial<
+export function getArchiveMembers(archiveId: number): RepoMembership[] {
+  return load().repos.filter((r) => r.archive_id === archiveId);
+}
+
+/** All archives (for scheduler global due set). */
+export function listArchives(): Archive[] {
+  return [...load().archives];
+}
+
+export type ArchiveUpdatableFields = Partial<
   Pick<
-    Repo,
+    Archive,
     | 'last_synced_at'
-    | 'from_star'
-    | 'from_owned'
-    | 'local_description'
+    | 'clone_url'
+    | 'mirror_path'
     | 'remote_description'
     | 'topics'
     | 'language'
@@ -681,35 +1129,258 @@ export type RepoUpdatableFields = Partial<
   >
 >;
 
+export function updateArchive(
+  id: number,
+  updates: ArchiveUpdatableFields
+): void {
+  load();
+  const idx = data!.archives.findIndex((a) => a.id === id);
+  if (idx >= 0) {
+    Object.assign(data!.archives[idx], updates);
+    save();
+  }
+}
+
+export function createArchive(
+  input: Omit<Archive, 'id'> & { id?: number }
+): Archive {
+  load();
+  const archive: Archive = {
+    ...input,
+    id: input.id ?? nextIds.archives++,
+    topics: input.topics ?? [],
+  };
+  data!.archives.push(archive);
+  save();
+  return { ...archive };
+}
+
+// ── Repos (memberships) ─────────────────────────────────────────
+
+/**
+ * Create a membership linking the current (or specified) user to an archive.
+ */
+export function linkUserToArchive(
+  archiveId: number,
+  opts: {
+    owner_id?: string;
+    from_star?: boolean;
+    from_owned?: boolean;
+    local_description?: string | null;
+  } = {}
+): Repo {
+  load();
+  const ownerId = opts.owner_id || uid();
+  const existing = data!.repos.find(
+    (r) => r.owner_id === ownerId && r.archive_id === archiveId
+  );
+  if (existing) {
+    return hydrateRepo(existing, archiveById(data!, archiveId));
+  }
+
+  const membership: RepoMembership = {
+    id: nextIds.repos++,
+    owner_id: ownerId,
+    archive_id: archiveId,
+    created_at: new Date().toISOString(),
+    from_star: opts.from_star,
+    from_owned: opts.from_owned,
+    local_description: opts.local_description ?? null,
+  };
+  data!.repos.push(membership);
+  save();
+  return hydrateRepo(membership, archiveById(data!, archiveId));
+}
+
+/**
+ * @deprecated Prefer createArchive + linkUserToArchive / ensure via callers.
+ * Kept for simple create paths that already built archive fields.
+ */
+export function addRepo(
+  repo: {
+    platform: 'github' | 'gitlab';
+    owner: string;
+    name: string;
+    clone_url: string;
+    mirror_path: string;
+    last_synced_at?: string | null;
+    from_star?: boolean;
+    from_owned?: boolean;
+    owner_id?: string;
+    is_private?: boolean;
+    local_description?: string | null;
+  }
+): Repo {
+  load();
+  const isPrivate = Boolean(repo.is_private);
+  let archive: Archive | undefined;
+  if (!isPrivate) {
+    archive = findPublicArchive(repo.platform, repo.owner, repo.name);
+  }
+  if (!archive) {
+    archive = createArchive({
+      platform: repo.platform,
+      owner: repo.owner,
+      name: repo.name,
+      clone_url: repo.clone_url,
+      mirror_path: repo.mirror_path,
+      last_synced_at: repo.last_synced_at ?? null,
+      is_private: isPrivate,
+    });
+  }
+  return linkUserToArchive(archive.id, {
+    owner_id: repo.owner_id,
+    from_star: repo.from_star,
+    from_owned: repo.from_owned,
+    local_description: repo.local_description,
+  });
+}
+
+export function findRepo(
+  platform: string,
+  owner: string,
+  name: string
+): Repo | undefined {
+  const userId = uid();
+  const d = load();
+  const key = identityKey(platform, owner, name);
+  for (const m of d.repos) {
+    if (m.owner_id !== userId) continue;
+    const a = archiveById(d, m.archive_id);
+    if (a && identityKey(a.platform, a.owner, a.name) === key) {
+      return hydrateRepo(m, a);
+    }
+  }
+  return undefined;
+}
+
+export function getRepoById(id: number): Repo | undefined {
+  const userId = uid();
+  const d = load();
+  const m = d.repos.find((r) => r.id === id && r.owner_id === userId);
+  if (!m) return undefined;
+  return hydrateRepo(m, archiveById(d, m.archive_id));
+}
+
+/** Membership fields only. */
+export type RepoMembershipUpdatableFields = Partial<
+  Pick<RepoMembership, 'from_star' | 'from_owned' | 'local_description'>
+>;
+
+/** Fields that live on the archive (shared). */
+export type RepoArchiveUpdatableFields = ArchiveUpdatableFields;
+
+export type RepoUpdatableFields = RepoMembershipUpdatableFields &
+  RepoArchiveUpdatableFields;
+
+/**
+ * Update membership and/or archive fields for a membership id.
+ * When no ALS user is set, any membership id may be updated (scheduler).
+ */
 export function updateRepo(id: number, updates: RepoUpdatableFields) {
   load();
   const userId = tryGetUserId();
   const idx = data!.repos.findIndex(
     (r) => r.id === id && (userId ? r.owner_id === userId : true)
   );
-  if (idx >= 0) {
-    Object.assign(data!.repos[idx], updates);
-    save();
+  if (idx < 0) return;
+
+  const membershipKeys: (keyof RepoMembershipUpdatableFields)[] = [
+    'from_star',
+    'from_owned',
+    'local_description',
+  ];
+  const membershipUpdates: RepoMembershipUpdatableFields = {};
+  const archiveUpdates: ArchiveUpdatableFields = {};
+
+  for (const [k, v] of Object.entries(updates)) {
+    if (membershipKeys.includes(k as keyof RepoMembershipUpdatableFields)) {
+      (membershipUpdates as any)[k] = v;
+    } else {
+      (archiveUpdates as any)[k] = v;
+    }
   }
+
+  if (Object.keys(membershipUpdates).length) {
+    Object.assign(data!.repos[idx], membershipUpdates);
+  }
+  if (Object.keys(archiveUpdates).length) {
+    const archiveId = data!.repos[idx].archive_id;
+    const aidx = data!.archives.findIndex((a) => a.id === archiveId);
+    if (aidx >= 0) Object.assign(data!.archives[aidx], archiveUpdates);
+  }
+  save();
 }
 
-export function deleteRepo(id: number) {
+/**
+ * Unlink current user from a repo membership. Physically deletes the archive
+ * (mirror + release files) only when no other members remain.
+ * Returns whether the underlying archive was destroyed.
+ */
+export function unlinkRepo(id: number): {
+  unlinked: boolean;
+  archiveDeleted: boolean;
+  mirrorPath: string | null;
+  assetPaths: string[];
+} {
   load();
   const userId = uid();
-  const repo = data!.repos.find((r) => r.id === id && r.owner_id === userId);
-  if (!repo) return;
-
-  const releaseIds = new Set(
-    data!.releases.filter((r) => r.repo_id === id).map((r) => r.id)
+  const membership = data!.repos.find(
+    (r) => r.id === id && r.owner_id === userId
   );
+  if (!membership) {
+    return {
+      unlinked: false,
+      archiveDeleted: false,
+      mirrorPath: null,
+      assetPaths: [],
+    };
+  }
+
+  const archiveId = membership.archive_id;
+  const archive = archiveById(data!, archiveId);
+
   data!.repos = data!.repos.filter((r) => r.id !== id);
-  data!.releases = data!.releases.filter((r) => r.repo_id !== id);
+  data!.sync_logs = data!.sync_logs.filter((l) => l.repo_id !== id);
+  data!.repo_lists = data!.repo_lists.filter((rl) => rl.repo_id !== id);
+
+  const remaining = data!.repos.filter((r) => r.archive_id === archiveId);
+  if (remaining.length > 0) {
+    save();
+    return {
+      unlinked: true,
+      archiveDeleted: false,
+      mirrorPath: null,
+      assetPaths: [],
+    };
+  }
+
+  // Last member — collect asset paths then drop archive content
+  const releaseIds = new Set(
+    data!.releases.filter((r) => r.archive_id === archiveId).map((r) => r.id)
+  );
+  const assetPaths = data!.release_assets
+    .filter((a) => releaseIds.has(a.release_id) && a.file_path)
+    .map((a) => a.file_path!);
+
+  data!.releases = data!.releases.filter((r) => r.archive_id !== archiveId);
   data!.release_assets = data!.release_assets.filter(
     (a) => !releaseIds.has(a.release_id)
   );
-  data!.sync_logs = data!.sync_logs.filter((l) => l.repo_id !== id);
-  data!.repo_lists = data!.repo_lists.filter((rl) => rl.repo_id !== id);
+  data!.archives = data!.archives.filter((a) => a.id !== archiveId);
   save();
+
+  return {
+    unlinked: true,
+    archiveDeleted: true,
+    mirrorPath: archive?.mirror_path ?? null,
+    assetPaths,
+  };
+}
+
+/** @deprecated Use unlinkRepo — kept name for older call sites. */
+export function deleteRepo(id: number) {
+  unlinkRepo(id);
 }
 
 // ── Lists ───────────────────────────────────────────────────────
@@ -804,7 +1475,6 @@ export function deleteList(id: number) {
 }
 
 export function getRepoListIds(repoId: number): number[] {
-  // Ownership enforced via getRepoById at call sites; filter list links to owned lists
   const userId = uid();
   const ownedListIds = new Set(ownedLists(userId).map((l) => l.id));
   return load()
@@ -828,9 +1498,7 @@ export function setRepoLists(repoId: number, listIds: number[]) {
   data!.repo_lists = data!.repo_lists.filter((rl) => rl.repo_id !== repoId);
   const unique = [...new Set(listIds)];
   for (const list_id of unique) {
-    if (
-      data!.lists.some((l) => l.id === list_id && l.owner_id === userId)
-    ) {
+    if (data!.lists.some((l) => l.id === list_id && l.owner_id === userId)) {
       data!.repo_lists.push({ repo_id: repoId, list_id });
     }
   }
@@ -869,7 +1537,7 @@ export function getListRepoIds(listId: number): number[] {
   const userId = uid();
   const list = data!.lists.find((l) => l.id === listId && l.owner_id === userId);
   if (!list) return [];
-  const ownedRepoIds = new Set(ownedRepos(userId).map((r) => r.id));
+  const ownedRepoIds = new Set(ownedMemberships(userId).map((r) => r.id));
   return data!.repo_lists
     .filter((rl) => rl.list_id === listId && ownedRepoIds.has(rl.repo_id))
     .map((rl) => rl.repo_id);
@@ -877,7 +1545,7 @@ export function getListRepoIds(listId: number): number[] {
 
 export function getListCounts(): Record<number, number> {
   const userId = uid();
-  const ownedRepoIds = new Set(ownedRepos(userId).map((r) => r.id));
+  const ownedRepoIds = new Set(ownedMemberships(userId).map((r) => r.id));
   const ownedListIds = new Set(ownedLists(userId).map((l) => l.id));
   const counts: Record<number, number> = {};
   for (const rl of load().repo_lists) {
@@ -920,7 +1588,9 @@ export function upsertGithubList(input: {
 
 // ── Releases / sync logs ────────────────────────────────────────
 
-export function addRelease(release: Omit<Release, 'id' | 'created_at'>): Release {
+export function addRelease(
+  release: Omit<Release, 'id' | 'created_at'>
+): Release {
   load();
   const now = new Date().toISOString();
   const newRel: Release = { ...release, id: nextIds.releases++, created_at: now };
@@ -954,12 +1624,12 @@ export function addSyncLog(log: Omit<SyncLog, 'id' | 'created_at'>): SyncLog {
 }
 
 export function getReleaseByTag(
-  repoId: number,
+  archiveId: number,
   tagName: string
 ): Release | undefined {
   load();
   return data!.releases.find(
-    (r) => r.repo_id === repoId && r.tag_name === tagName
+    (r) => r.archive_id === archiveId && r.tag_name === tagName
   );
 }
 
@@ -975,9 +1645,14 @@ export function assetExists(releaseId: number, assetName: string): boolean {
   );
 }
 
-export function tagExists(repoId: number, tagName: string): boolean {
+export function tagExists(archiveId: number, tagName: string): boolean {
   load();
   return data!.releases.some(
-    (r) => r.repo_id === repoId && r.tag_name === tagName
+    (r) => r.archive_id === archiveId && r.tag_name === tagName
   );
+}
+
+/** Count releases for an archive (unscoped). */
+export function countArchiveReleases(archiveId: number): number {
+  return load().releases.filter((r) => r.archive_id === archiveId).length;
 }

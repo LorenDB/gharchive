@@ -1,3 +1,4 @@
+import fs from 'fs';
 import {
   addRelease,
   addReleaseAsset,
@@ -8,8 +9,9 @@ import {
   getReleaseByTag,
   getSettings,
   getDb,
+  countArchiveReleases,
 } from '@/lib/db';
-import { syncMirror, isRemoteMissingError } from '@/lib/git';
+import { syncMirror, isRemoteMissingError, withMirrorLock } from '@/lib/git';
 import {
   fetchReleases,
   downloadReleaseAsset,
@@ -21,15 +23,18 @@ import { sendAlert, repoLabel } from '@/lib/alerts';
 
 export interface RepoLike {
   id: number;
+  archive_id: number;
   platform: string;
   owner: string;
   name: string;
   mirror_path: string;
+  is_private?: boolean;
 }
 
 /**
  * Full sync: snapshot+fetch git mirror, then pull releases/assets.
  * When `skipGit` is true (fresh clone), only release metadata/assets are synced.
+ * Content is stored on the shared archive; sync_logs attach to the membership id.
  * Emits Apprise alerts for major archive events when configured.
  */
 export async function syncRepo(
@@ -39,6 +44,8 @@ export async function syncRepo(
   const messages: string[] = [];
   const settings = getSettings();
   const label = repoLabel(repo);
+  const archiveId = repo.archive_id;
+  const isPrivate = Boolean(repo.is_private);
 
   if (!options.skipGit) {
     const memCheck = hasEnoughMemory();
@@ -52,7 +59,9 @@ export async function syncRepo(
     }
 
     try {
-      const gitResult = await syncMirror(repo.mirror_path);
+      const gitResult = await withMirrorLock(repo.mirror_path, () =>
+        syncMirror(repo.mirror_path)
+      );
       messages.push(`git: ${gitResult.message || 'up to date'}`);
 
       if (gitResult.repoDeleted) {
@@ -74,7 +83,7 @@ export async function syncRepo(
             gitResult.message.slice(0, 500),
             '```',
           ].join('\n'),
-          subject: `${repo.id}`,
+          subject: `archive:${archiveId}`,
           severity: 'failure',
         });
         return { ok: false, messages, error: 'Remote repository not found' };
@@ -91,7 +100,7 @@ export async function syncRepo(
             '',
             ...gitResult.historyDetails.map((d) => `- ${d}`),
           ].join('\n'),
-          subject: `${repo.id}:${gitResult.historyDetails[0] || 'wipe'}`,
+          subject: `archive:${archiveId}:${gitResult.historyDetails[0] || 'wipe'}`,
           severity: 'failure',
         });
       }
@@ -116,7 +125,7 @@ export async function syncRepo(
             errMsg.slice(0, 500),
             '```',
           ].join('\n'),
-          subject: `${repo.id}`,
+          subject: `archive:${archiveId}`,
           severity: 'failure',
         });
         return { ok: false, messages, error: errMsg };
@@ -131,7 +140,7 @@ export async function syncRepo(
         category: 'sync_failed',
         title: `Sync failed: ${label}`,
         body: `Git sync failed for **${label}**:\n\n\`\`\`\n${errMsg.slice(0, 800)}\n\`\`\``,
-        subject: `${repo.id}:git`,
+        subject: `archive:${archiveId}:git`,
         severity: 'warning',
       });
       return { ok: false, messages, error: errMsg };
@@ -163,7 +172,6 @@ export async function syncRepo(
             : 'meta: remote description/topics refreshed'
         );
 
-        // Fire once when we observe a transition to archived (not on first meta scrape)
         if (meta.is_archived && !wasArchived && hadRemoteMeta) {
           messages.push('remote: repository marked archived upstream');
           await sendAlert({
@@ -175,7 +183,7 @@ export async function syncRepo(
               'The local bare mirror and release archive are still kept.',
               'No new commits or releases are expected from upstream.',
             ].join('\n'),
-            subject: `${repo.id}:archived`,
+            subject: `archive:${archiveId}:archived`,
             severity: 'warning',
           });
         }
@@ -187,11 +195,7 @@ export async function syncRepo(
     messages.push(`meta: failed - ${err?.message || err}`);
   }
 
-  // Count previously archived releases for wipe detection
-  const priorReleaseCount = getDb().releases.filter(
-    (r) => r.repo_id === repo.id
-  ).length;
-
+  const priorReleaseCount = countArchiveReleases(archiveId);
   const newReleaseTags: string[] = [];
 
   try {
@@ -201,7 +205,6 @@ export async function syncRepo(
       projectPath
     );
 
-    // Releases wiped: we had archived releases, upstream now returns none
     if (priorReleaseCount > 0 && releases.length === 0) {
       messages.push(
         `releases: wiped upstream (had ${priorReleaseCount} archived, remote has 0)`
@@ -213,7 +216,7 @@ export async function syncRepo(
           `**${label}** no longer has any releases on the remote.`,
           `Local archive still has **${priorReleaseCount}** release(s) (metadata/assets preserved).`,
         ].join('\n'),
-        subject: `${repo.id}`,
+        subject: `archive:${archiveId}`,
         severity: 'failure',
       });
     }
@@ -227,9 +230,9 @@ export async function syncRepo(
         : Infinity;
 
     for (const rel of releases) {
-      if (!dbTagExists(repo.id, rel.tag_name)) {
+      if (!dbTagExists(archiveId, rel.tag_name)) {
         addRelease({
-          repo_id: repo.id,
+          archive_id: archiveId,
           tag_name: rel.tag_name,
           name: rel.name,
           body: rel.body,
@@ -239,7 +242,7 @@ export async function syncRepo(
         newReleaseTags.push(rel.tag_name);
       }
 
-      const releaseRow = getReleaseByTag(repo.id, rel.tag_name);
+      const releaseRow = getReleaseByTag(archiveId, rel.tag_name);
       if (!releaseRow) continue;
 
       for (const asset of rel.assets) {
@@ -250,7 +253,8 @@ export async function syncRepo(
           repo.owner,
           repo.name,
           rel.tag_name,
-          asset.name
+          asset.name,
+          { isPrivate }
         );
 
         let downloaded = false;
@@ -270,7 +274,15 @@ export async function syncRepo(
               continue;
             }
           }
-          downloaded = await downloadReleaseAsset(asset.download_url, assetPath);
+          // If file already exists (shared path from another user's sync), link it
+          if (fs.existsSync(assetPath)) {
+            downloaded = true;
+          } else {
+            downloaded = await downloadReleaseAsset(
+              asset.download_url,
+              assetPath
+            );
+          }
         }
 
         addReleaseAsset({
@@ -289,7 +301,6 @@ export async function syncRepo(
     if (skippedAssets > 0) releaseMsg += `, ${skippedAssets} skipped`;
     messages.push(releaseMsg);
 
-    // Notify for new releases (one alert listing all new tags this sync)
     if (newReleaseTags.length > 0) {
       const tagList = newReleaseTags
         .slice(0, 20)
@@ -310,7 +321,7 @@ export async function syncRepo(
           '',
           tagList + more,
         ].join('\n'),
-        subject: `${repo.id}:${newReleaseTags.join(',')}`,
+        subject: `archive:${archiveId}:${newReleaseTags.join(',')}`,
         severity: 'info',
       });
     }
@@ -318,7 +329,6 @@ export async function syncRepo(
     const errMsg = err?.message || String(err);
     messages.push(`releases: failed - ${errMsg}`);
 
-    // API 404 for releases often means repo is gone
     if (
       isRemoteMissingError(errMsg) ||
       /GitHub API error: 404/i.test(errMsg) ||
@@ -334,7 +344,7 @@ export async function syncRepo(
           errMsg.slice(0, 500),
           '```',
         ].join('\n'),
-        subject: `${repo.id}`,
+        subject: `archive:${archiveId}`,
         severity: 'failure',
       });
     } else {
@@ -342,7 +352,7 @@ export async function syncRepo(
         category: 'sync_failed',
         title: `Release sync failed: ${label}`,
         body: `Release fetch failed for **${label}**:\n\n\`\`\`\n${errMsg.slice(0, 800)}\n\`\`\``,
-        subject: `${repo.id}:releases`,
+        subject: `archive:${archiveId}:releases`,
         severity: 'warning',
       });
     }

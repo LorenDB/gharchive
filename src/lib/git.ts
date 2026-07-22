@@ -11,8 +11,10 @@ import { hasEnoughMemory } from '@/lib/memory';
 
 const execAsync = promisify(execCb);
 
-const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
-const MIRRORS_DIR = path.join(DATA_DIR, 'mirrors');
+function getMirrorsDir(): string {
+  const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+  return path.join(dataDir, 'mirrors');
+}
 
 function run(cmd: string, cwd?: string): Promise<{ stdout: string; stderr: string }> {
   return execAsync(cmd, { encoding: 'utf8', cwd, maxBuffer: 10 * 1024 * 1024 });
@@ -25,23 +27,34 @@ function assertMemory(label: string): void {
   }
 }
 
+export type MirrorPathOptions = {
+  /** Private archives are isolated per user; public use a shared path. */
+  isPrivate?: boolean;
+  userId?: string;
+};
+
 /**
  * On-disk path for a bare mirror.
- * - Autologin / legacy: `mirrors/{platform}/{owner}/{name}.git`
- * - SSO users: `mirrors/users/{userId}/{platform}/{owner}/{name}.git`
+ * - Public (shared): `mirrors/{platform}/{owner}/{name}.git`
+ * - Private: `mirrors/users/{userId}/{platform}/{owner}/{name}.git`
  */
 export function getMirrorPath(
   platform: string,
   owner: string,
   name: string,
-  userId?: string
+  options?: MirrorPathOptions | string
 ): string {
-  const uid = userId ?? tryGetUserId() ?? AUTOLOGIN_USER_ID;
-  if (uid === AUTOLOGIN_USER_ID) {
-    return path.join(MIRRORS_DIR, platform, owner, name + '.git');
+  // Back-compat: third arg used to be userId string
+  const opts: MirrorPathOptions =
+    typeof options === 'string' ? { userId: options } : options || {};
+  const isPrivate = Boolean(opts.isPrivate);
+  const mirrorsDir = getMirrorsDir();
+  if (!isPrivate) {
+    return path.join(mirrorsDir, platform, owner, name + '.git');
   }
+  const uid = opts.userId ?? tryGetUserId() ?? AUTOLOGIN_USER_ID;
   return path.join(
-    MIRRORS_DIR,
+    mirrorsDir,
     'users',
     safeUserPathSegment(uid),
     platform,
@@ -50,17 +63,62 @@ export function getMirrorPath(
   );
 }
 
-export async function cloneMirror(cloneUrl: string, mirrorPath: string): Promise<void> {
+function looksLikeBareRepo(mirrorPath: string): boolean {
+  return (
+    fs.existsSync(path.join(mirrorPath, 'HEAD')) &&
+    fs.existsSync(path.join(mirrorPath, 'objects')) &&
+    fs.existsSync(path.join(mirrorPath, 'refs'))
+  );
+}
+
+/**
+ * Clone a bare mirror. If `mirrorPath` already holds a bare repo, reuses it
+ * (critical for shared public archives — never wipe another user's data).
+ */
+export async function cloneMirror(
+  cloneUrl: string,
+  mirrorPath: string
+): Promise<{ reused: boolean }> {
   assertMemory(`clone ${cloneUrl}`);
   const dir = path.dirname(mirrorPath);
   fs.mkdirSync(dir, { recursive: true });
 
   if (fs.existsSync(mirrorPath)) {
+    if (looksLikeBareRepo(mirrorPath)) {
+      await applyGcProtection(mirrorPath);
+      return { reused: true };
+    }
+    // Corrupt / incomplete prior attempt
     fs.rmSync(mirrorPath, { recursive: true, force: true });
   }
 
   await run(`git clone --bare --mirror "${cloneUrl}" "${mirrorPath}"`);
   await applyGcProtection(mirrorPath);
+  return { reused: false };
+}
+
+/** Serialize concurrent git ops on the same bare mirror path. */
+const mirrorLocks = new Map<string, Promise<unknown>>();
+
+export async function withMirrorLock<T>(
+  mirrorPath: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const key = path.resolve(mirrorPath);
+  const prev = mirrorLocks.get(key) || Promise.resolve();
+  let resolveNext!: () => void;
+  const next = new Promise<void>((r) => {
+    resolveNext = r;
+  });
+  // Chain: wait for prev, then hold until we finish
+  const held = prev.catch(() => {}).then(() => next);
+  mirrorLocks.set(key, held);
+  await prev.catch(() => {});
+  try {
+    return await fn();
+  } finally {
+    resolveNext();
+  }
 }
 
 async function applyGcProtection(mirrorPath: string): Promise<void> {

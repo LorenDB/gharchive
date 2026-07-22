@@ -16,7 +16,7 @@ export async function GET(
 
     const { releases } = getDb();
     const repoReleases = releases
-      .filter((r) => r.repo_id === repo.id)
+      .filter((r) => r.archive_id === repo.archive_id)
       .sort((a, b) => {
         if (!a.published_at && !b.published_at) return 0;
         if (!a.published_at) return 1;

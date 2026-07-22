@@ -80,7 +80,12 @@ export default function RepoDetail() {
   }
 
   async function handleDelete() {
-    if (!confirm('Delete this repository and all its archived data?')) return;
+    if (
+      !confirm(
+        'Remove this repository from your account? Shared archives are kept until no users reference them.'
+      )
+    )
+      return;
     await fetch(`/api/repos/${id}`, { method: 'DELETE' });
     router.push('/');
   }

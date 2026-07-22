@@ -108,6 +108,8 @@ export async function runScheduledSync(
   let dueTotal = 0;
   const userParts: string[] = [];
   const userIds = onlyUserId ? [onlyUserId] : listUserIds();
+  /** Shared public archives: only sync once per tick even if many users link them. */
+  const syncedArchiveIds = new Set<number>();
 
   try {
     for (const userId of userIds) {
@@ -124,11 +126,18 @@ export async function runScheduledSync(
               isDue(r.last_synced_at, settings.sync_interval_hours)
             );
 
+        // Skip memberships whose archive was already synced this tick (shared public)
+        const work = due.filter((r) => {
+          if (syncedArchiveIds.has(r.archive_id)) return false;
+          return true;
+        });
+
         let uSynced = 0;
         let uFailed = 0;
+        let uSkippedShared = due.length - work.length;
 
         const adjustedConcurrency = getAdjustedConcurrency(settings.concurrent_syncs);
-        if (adjustedConcurrency < 1 && due.length > 0) {
+        if (adjustedConcurrency < 1 && work.length > 0) {
           return {
             synced: 0,
             failed: 0,
@@ -138,7 +147,13 @@ export async function runScheduledSync(
           };
         }
 
-        await mapPool(due, adjustedConcurrency, async (repo) => {
+        await mapPool(work, adjustedConcurrency, async (repo) => {
+          // Claim archive before sync so concurrent pool workers don't double-fetch
+          if (syncedArchiveIds.has(repo.archive_id)) {
+            uSkippedShared++;
+            return;
+          }
+          syncedArchiveIds.add(repo.archive_id);
           try {
             const result = await syncRepo(repo);
             if (result.ok) uSynced++;
@@ -151,7 +166,7 @@ export async function runScheduledSync(
         return {
           synced: uSynced,
           failed: uFailed,
-          skipped: repos.length - due.length,
+          skipped: repos.length - due.length + uSkippedShared,
           due: due.length,
           note: due.length ? `due ${due.length}` : 'none due',
         };

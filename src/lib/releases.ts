@@ -7,8 +7,10 @@ import {
 } from '@/lib/user-context';
 import { hasEnoughMemory } from '@/lib/memory';
 
-const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
-const RELEASES_DIR = path.join(DATA_DIR, 'releases');
+function getReleasesDir(): string {
+  const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+  return path.join(dataDir, 'releases');
+}
 
 export interface ReleaseData {
   tag_name: string;
@@ -169,10 +171,16 @@ export async function downloadReleaseAsset(
   }
 }
 
+export type ReleasePathOptions = {
+  /** Private archives isolate assets per user; public share one tree. */
+  isPrivate?: boolean;
+  userId?: string;
+};
+
 /**
- * On-disk path for a downloaded release asset (mirrors multi-user layout).
- * - Autologin: `releases/{platform}/{owner}/{repo}/{tag}/{file}`
- * - SSO: `releases/users/{userId}/{platform}/...`
+ * On-disk path for a downloaded release asset.
+ * - Public (shared): `releases/{platform}/{owner}/{repo}/{tag}/{file}`
+ * - Private: `releases/users/{userId}/{platform}/{owner}/{repo}/{tag}/{file}`
  */
 export function getReleaseAssetPath(
   platform: string,
@@ -180,14 +188,19 @@ export function getReleaseAssetPath(
   repo: string,
   tag: string,
   filename: string,
-  userId?: string
+  options?: ReleasePathOptions | string
 ): string {
-  const uid = userId ?? tryGetUserId() ?? AUTOLOGIN_USER_ID;
-  if (uid === AUTOLOGIN_USER_ID) {
-    return path.join(RELEASES_DIR, platform, owner, repo, tag, filename);
+  // Back-compat: last arg used to be userId string
+  const opts: ReleasePathOptions =
+    typeof options === 'string' ? { userId: options } : options || {};
+  const releasesDir = getReleasesDir();
+  const isPrivate = Boolean(opts.isPrivate);
+  if (!isPrivate) {
+    return path.join(releasesDir, platform, owner, repo, tag, filename);
   }
+  const uid = opts.userId ?? tryGetUserId() ?? AUTOLOGIN_USER_ID;
   return path.join(
-    RELEASES_DIR,
+    releasesDir,
     'users',
     safeUserPathSegment(uid),
     platform,

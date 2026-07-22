@@ -1,6 +1,8 @@
 import {
   findRepo,
-  addRepo,
+  findPublicArchive,
+  createArchive,
+  linkUserToArchive,
   upsertGithubList,
   addRepoToList,
   setRepoLists,
@@ -38,6 +40,8 @@ export interface ImportItem {
   local_list_names?: string[];
   from_star?: boolean;
   from_owned?: boolean;
+  /** When true, never share the archive across users */
+  is_private?: boolean;
   /** User who enqueued this item (for round-robin scheduling) */
   userId?: string;
 }
@@ -314,29 +318,40 @@ function pickNextItem(): ImportItem | undefined {
 
 async function processQueue() {
   const j = job();
-  const userId = j.userId;
-  if (!userId) {
+  if (!j.userId && j.queue.length === 0) {
     j.running = false;
     j.finished_at = new Date().toISOString();
     throw new Error('Import job missing userId');
   }
 
-  await runAsUserAsync(userId, async () => {
-    const settings = getSettings();
+  while (j.queue.length > 0) {
+    if (j.cancelled) break;
 
-    while (j.queue.length > 0) {
-      if (j.cancelled) break;
+    const item = pickNextItem()!;
+    const itemUserId = item.userId || j.userId;
+    if (!itemUserId) {
+      j.failed++;
+      j.errors.push({
+        repo: `${item.owner}/${item.name}`,
+        error: 'Import item missing userId',
+      });
+      continue;
+    }
+
+    await runAsUserAsync(itemUserId, async () => {
+      const settings = getSettings();
 
       if (settings.memory_aware_enabled) {
         const memCheck = hasEnoughMemory();
         if (!memCheck.ok) {
           j.current = `paused (${memCheck.reason})`;
+          // Re-queue this item and wait
+          j.queue.unshift(item);
           await new Promise((r) => setTimeout(r, 30_000));
-          continue;
+          return;
         }
       }
 
-      const item = pickNextItem()!;
       const full = `${item.owner}/${item.name}`;
       j.current = full;
 
@@ -352,12 +367,12 @@ async function processQueue() {
           console.error(`[import] ${full}:`, err?.message || err);
         }
       }
-    }
+    });
+  }
 
-    j.current = j.cancelled ? 'cancelled' : null;
-    j.running = false;
-    j.finished_at = new Date().toISOString();
-  });
+  j.current = j.cancelled ? 'cancelled' : null;
+  j.running = false;
+  j.finished_at = new Date().toISOString();
 }
 
 async function importOne(item: ImportItem, listMap: Map<string, List>) {
@@ -365,7 +380,11 @@ async function importOne(item: ImportItem, listMap: Map<string, List>) {
 
   const listIds: number[] = [];
   for (const gid of item.github_list_ids) {
-    const local = listMap.get(gid) || getListByGithubId(gid) || undefined;
+    // Prefer current-user lookup; listMap may belong to another user in multi-user queues
+    const cached = listMap.get(gid);
+    const local =
+      getListByGithubId(gid) ||
+      (cached && cached.owner_id === tryGetUserId() ? cached : undefined);
     if (local) listIds.push(local.id);
   }
   for (const name of item.local_list_names || []) {
@@ -391,27 +410,50 @@ async function importOne(item: ImportItem, listMap: Map<string, List>) {
 
   const cloneUrl =
     item.clone_url || `https://github.com/${item.owner}/${item.name}.git`;
-  const mirrorPath = getMirrorPath('github', item.owner, item.name);
+  const isPrivate = Boolean(item.is_private);
 
-  await cloneMirror(cloneUrl, mirrorPath);
+  let repo;
+  let linkedOnly = false;
 
-  const repo = addRepo({
-    platform: 'github',
-    owner: item.owner,
-    name: item.name,
-    clone_url: cloneUrl,
-    mirror_path: mirrorPath,
-    last_synced_at: null,
-    from_star: Boolean(item.from_star),
-    from_owned: Boolean(item.from_owned),
-  });
+  if (!isPrivate) {
+    const shared = findPublicArchive('github', item.owner, item.name);
+    if (shared) {
+      repo = linkUserToArchive(shared.id, {
+        from_star: Boolean(item.from_star),
+        from_owned: Boolean(item.from_owned),
+      });
+      linkedOnly = true;
+    }
+  }
+
+  if (!repo) {
+    const mirrorPath = getMirrorPath('github', item.owner, item.name, {
+      isPrivate,
+      userId: tryGetUserId() || undefined,
+    });
+    await cloneMirror(cloneUrl, mirrorPath);
+    const archive = createArchive({
+      platform: 'github',
+      owner: item.owner,
+      name: item.name,
+      clone_url: cloneUrl,
+      mirror_path: mirrorPath,
+      last_synced_at: null,
+      is_private: isPrivate,
+    });
+    repo = linkUserToArchive(archive.id, {
+      from_star: Boolean(item.from_star),
+      from_owned: Boolean(item.from_owned),
+    });
+  }
 
   if (listIds.length) {
     setRepoLists(repo.id, listIds);
   }
 
   try {
-    await syncRepo(repo, { skipGit: true });
+    // Fresh clone: skip git. Linked to existing shared archive: light refresh ok.
+    await syncRepo(repo, { skipGit: !linkedOnly });
   } catch (e: any) {
     console.warn(
       `[import] release sync for ${item.owner}/${item.name}:`,
@@ -434,6 +476,7 @@ export function itemsFromSelection(
       clone_url: s.clone_url,
       github_list_ids: membership[s.full_name] || [],
       from_star: true,
+      is_private: Boolean(s.private),
     }));
 }
 
@@ -445,6 +488,7 @@ export function itemsFromOwned(repos: GhOwnedRepo[]): ImportItem[] {
     github_list_ids: [],
     local_list_names: ['Owned'],
     from_owned: true,
+    is_private: Boolean(r.private),
   }));
 }
 

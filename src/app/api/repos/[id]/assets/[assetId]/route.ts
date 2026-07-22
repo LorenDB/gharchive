@@ -19,7 +19,9 @@ export async function GET(
     }
 
     const repoReleaseIds = new Set(
-      releases.filter((r) => r.repo_id === repoId).map((r) => r.id)
+      releases
+        .filter((r) => r.archive_id === repo.archive_id)
+        .map((r) => r.id)
     );
 
     // Scan assets belonging to this repo's releases

@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
+import fs from 'fs';
 import {
   getDb,
-  deleteRepo,
+  unlinkRepo,
   getRepoLists,
   getLists,
   updateRepo,
@@ -113,16 +114,31 @@ export async function DELETE(
 ) {
   return withApiUser(async () => {
     const id = parseInt(params.id);
-    const { repos } = getDb();
-    const repo = repos.find((r) => r.id === id);
+    const repo = getRepoById(id);
 
     if (!repo) {
       return NextResponse.json({ error: 'Not found' }, { status: 404 });
     }
 
-    await deleteMirror(repo.mirror_path);
-    deleteRepo(id);
+    const result = unlinkRepo(id);
 
-    return NextResponse.json({ ok: true });
+    if (result.archiveDeleted) {
+      if (result.mirrorPath) {
+        await deleteMirror(result.mirrorPath);
+      }
+      for (const assetPath of result.assetPaths) {
+        try {
+          if (fs.existsSync(assetPath)) fs.unlinkSync(assetPath);
+        } catch {
+          // best-effort asset cleanup
+        }
+      }
+    }
+
+    return NextResponse.json({
+      ok: true,
+      unlinked: result.unlinked,
+      archive_deleted: result.archiveDeleted,
+    });
   });
 }
