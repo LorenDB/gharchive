@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation';
 import Navbar from '@/components/Navbar';
+import AssetHostApprovalModal from '@/components/AssetHostApprovalModal';
 import { getCurrentUser, isAutologinMode, isOidcConfigured } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
@@ -39,6 +40,7 @@ export default async function AppLayout({
           <span className="font-mono">{autologin ? 'autologin' : 'sso'}</span>
         </div>
       </footer>
+      <AssetHostApprovalModal />
     </>
   );
 }

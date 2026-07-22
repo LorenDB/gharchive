@@ -262,7 +262,25 @@ async function fetchGitLabReleases(projectPath: string): Promise<ReleaseData[]> 
 export type DownloadAssetOptions = {
   /** Additional hostnames trusted for this download (e.g. repo's forge host). */
   extraTrustedHosts?: string[];
+  /**
+   * Called when an asset URL (or redirect) points at a host outside the
+   * allowlist — used to queue a user approval prompt.
+   */
+  onUntrustedHost?: (hostname: string, url: string) => void;
 };
+
+function notifyUntrustedHost(
+  rawUrl: string,
+  onUntrustedHost?: (hostname: string, url: string) => void
+): void {
+  if (!onUntrustedHost) return;
+  try {
+    const u = new URL(rawUrl);
+    if (u.hostname) onUntrustedHost(u.hostname.toLowerCase(), rawUrl);
+  } catch {
+    // ignore
+  }
+}
 
 export async function downloadReleaseAsset(
   url: string,
@@ -273,6 +291,7 @@ export async function downloadReleaseAsset(
     const trusted = parseTrustedAssetUrl(url, options.extraTrustedHosts);
     if (!trusted) {
       console.warn(`[releases] refusing untrusted asset URL: ${url.slice(0, 120)}`);
+      notifyUntrustedHost(url, options.onUntrustedHost);
       return false;
     }
 
@@ -306,14 +325,13 @@ export async function downloadReleaseAsset(
       if (res.status >= 300 && res.status < 400) {
         const loc = res.headers.get('location');
         if (!loc) return false;
-        const next = parseTrustedAssetUrl(
-          new URL(loc, current).toString(),
-          options.extraTrustedHosts
-        );
+        const absolute = new URL(loc, current).toString();
+        const next = parseTrustedAssetUrl(absolute, options.extraTrustedHosts);
         if (!next) {
           console.warn(
             `[releases] asset redirect to untrusted host blocked: ${loc.slice(0, 120)}`
           );
+          notifyUntrustedHost(absolute, options.onUntrustedHost);
           return false;
         }
         current = next;

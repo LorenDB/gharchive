@@ -22,8 +22,13 @@ const TRUSTED_ASSET_HOSTS = new Set([
   'www.codeberg.org',
 ]);
 
+export function normalizeHostname(hostname: string): string {
+  return hostname.toLowerCase().replace(/\.$/, '').replace(/^www\./, '');
+}
+
+/** @deprecated use normalizeHostname */
 function normalizeHost(hostname: string): string {
-  return hostname.toLowerCase().replace(/\.$/, '');
+  return normalizeHostname(hostname);
 }
 
 /** True when hostname is an exact trusted host or a githubusercontent subdomain. */

@@ -37,6 +37,8 @@ interface Settings {
   storage_alert_threshold_percent: number;
   storage_alert_min_free_mb: number;
   global_max_asset_size_mb: number;
+  approved_asset_hosts: string[];
+  rejected_asset_hosts: string[];
 }
 
 interface SchedulerStatus {
@@ -197,6 +199,13 @@ export default function SettingsClient({
   const [ghLists, setGhLists] = useState<{ id: number; name: string; github_list_id: string | null }[]>(
     initial.lists
   );
+  const [approvedHosts, setApprovedHosts] = useState<string[]>(
+    initial.settings?.approved_asset_hosts || []
+  );
+  const [rejectedHosts, setRejectedHosts] = useState<string[]>(
+    initial.settings?.rejected_asset_hosts || []
+  );
+  const [hostBusy, setHostBusy] = useState<string | null>(null);
 
   async function linkGithub(e: React.FormEvent) {
     e.preventDefault();
@@ -238,6 +247,47 @@ export default function SettingsClient({
       setMessage({ type: 'err', text: err.message });
     } finally {
       setGhBusy(false);
+    }
+  }
+
+  async function revokeHost(hostname: string) {
+    setHostBusy(hostname);
+    setMessage(null);
+    try {
+      const res = await fetch('/api/asset-hosts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'revoke', hostname }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to revoke');
+      const approved = Array.isArray(data.approved) ? data.approved : [];
+      const rejected = Array.isArray(data.rejected) ? data.rejected : [];
+      setApprovedHosts(approved);
+      setRejectedHosts(rejected);
+      setDraft((d) =>
+        d
+          ? {
+              ...d,
+              approved_asset_hosts: approved,
+              rejected_asset_hosts: rejected,
+            }
+          : d
+      );
+      setSettings((s) =>
+        s
+          ? {
+              ...s,
+              approved_asset_hosts: approved,
+              rejected_asset_hosts: rejected,
+            }
+          : s
+      );
+      setMessage({ type: 'ok', text: `Removed domain ${hostname}` });
+    } catch (err: any) {
+      setMessage({ type: 'err', text: err.message });
+    } finally {
+      setHostBusy(null);
     }
   }
 
@@ -872,7 +922,8 @@ export default function SettingsClient({
         <section className="surface p-5 sm:p-6">
           <h2 className="text-base font-semibold text-white mb-1">Release assets</h2>
           <p className="hint !mt-0 mb-5">
-            Control whether binary assets from GitHub/GitLab releases are stored locally.
+            Control whether binary assets from GitHub, GitLab, Codeberg, or other
+            release hosts are stored locally.
           </p>
 
           <div className="flex items-start justify-between gap-4 mb-5">
@@ -948,6 +999,80 @@ export default function SettingsClient({
                 </>
               )}
             </p>
+
+            <div className="mt-6 pt-5 border-t border-ink-800/80">
+              <h3 className="text-sm font-medium text-ink-200 mb-1">
+                Extra download domains
+              </h3>
+              <p className="hint !mt-0 mb-4">
+                When a Forgejo (or similar) host serves release assets from a
+                different domain, you&apos;ll get a popup to approve or reject
+                it. Manage those decisions here.
+              </p>
+
+              {approvedHosts.length === 0 && rejectedHosts.length === 0 ? (
+                <p className="text-xs text-ink-500">
+                  No approved or rejected domains yet.
+                </p>
+              ) : (
+                <div className="space-y-4">
+                  {approvedHosts.length > 0 && (
+                    <div>
+                      <p className="text-[11px] uppercase tracking-wide text-ink-500 mb-2">
+                        Approved
+                      </p>
+                      <ul className="space-y-1.5">
+                        {approvedHosts.map((h) => (
+                          <li
+                            key={h}
+                            className="flex items-center justify-between gap-3 rounded-lg border border-ink-800 bg-ink-950/40 px-3 py-2"
+                          >
+                            <span className="font-mono text-sm text-mint-400 break-all">
+                              {h}
+                            </span>
+                            <button
+                              type="button"
+                              className="btn-ghost !py-1 !px-2 text-xs shrink-0"
+                              disabled={hostBusy === h}
+                              onClick={() => revokeHost(h)}
+                            >
+                              {hostBusy === h ? '…' : 'Revoke'}
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {rejectedHosts.length > 0 && (
+                    <div>
+                      <p className="text-[11px] uppercase tracking-wide text-ink-500 mb-2">
+                        Rejected
+                      </p>
+                      <ul className="space-y-1.5">
+                        {rejectedHosts.map((h) => (
+                          <li
+                            key={h}
+                            className="flex items-center justify-between gap-3 rounded-lg border border-ink-800 bg-ink-950/40 px-3 py-2"
+                          >
+                            <span className="font-mono text-sm text-ink-400 break-all">
+                              {h}
+                            </span>
+                            <button
+                              type="button"
+                              className="btn-ghost !py-1 !px-2 text-xs shrink-0"
+                              disabled={hostBusy === h}
+                              onClick={() => revokeHost(h)}
+                            >
+                              {hostBusy === h ? '…' : 'Revoke'}
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </section>
 

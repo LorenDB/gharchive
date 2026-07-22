@@ -5,7 +5,6 @@ import {
   addSyncLog,
   updateRepo,
   tagExists as dbTagExists,
-  assetExists,
   getReleaseByTag,
   getSettings,
   getDb,
@@ -20,6 +19,13 @@ import {
 import { fetchRemoteRepoMeta } from '@/lib/remote-meta';
 import { hasEnoughMemory } from '@/lib/memory';
 import { sendAlert, repoLabel } from '@/lib/alerts';
+import {
+  classifyAssetHost,
+  effectiveExtraTrustedHosts,
+  hostnameFromAssetUrl,
+  requestAssetHostApproval,
+} from '@/lib/asset-hosts';
+import { findReleaseAsset, updateReleaseAsset } from '@/lib/db';
 
 export interface RepoLike {
   id: number;
@@ -197,18 +203,8 @@ export async function syncRepo(
   const priorReleaseCount = countArchiveReleases(archiveId);
   const newReleaseTags: string[] = [];
 
-  // Trust the repo's own host for release-asset downloads (Forgejo keeps assets
-  // on the same origin; GitHub/GitLab CDN hosts are already in the allowlist).
-  const assetExtraHosts: string[] = [];
-  try {
-    if (repo.clone_url) {
-      const { hostInfoFromCloneUrl } = await import('@/lib/forgejo');
-      const hi = hostInfoFromCloneUrl(repo.clone_url);
-      if (hi?.hostname) assetExtraHosts.push(hi.hostname);
-    }
-  } catch {
-    // ignore
-  }
+  // Built-in CDNs + repo host + user-approved hosts.
+  const assetExtraHosts = effectiveExtraTrustedHosts(repo.clone_url, settings);
 
   try {
     const projectPath = `${repo.owner}/${repo.name}`;
@@ -239,6 +235,8 @@ export async function syncRepo(
       let newReleases = 0;
       let newAssets = 0;
       let skippedAssets = 0;
+      let awaitingHostApproval = 0;
+      const pendingHosts = new Set<string>();
       const maxBytes =
         settings.max_asset_size_mb > 0
           ? settings.max_asset_size_mb * 1024 * 1024
@@ -269,7 +267,14 @@ export async function syncRepo(
         if (!releaseRow) continue;
 
         for (const asset of rel.assets) {
-          if (assetExists(releaseRow.id, asset.name)) continue;
+          const existing = findReleaseAsset(releaseRow.id, asset.name);
+          // Already local — skip
+          if (
+            existing?.file_path &&
+            fs.existsSync(existing.file_path)
+          ) {
+            continue;
+          }
 
           const assetPath = getReleaseAssetPath(
             repo.platform,
@@ -282,47 +287,104 @@ export async function syncRepo(
 
           let downloaded = false;
           const tooLarge = asset.size > 0 && asset.size > maxBytes;
+          let skipReason: 'settings' | 'size' | 'host' | 'rejected' | null =
+            null;
 
           if (!settings.download_release_assets) {
+            skipReason = 'settings';
             skippedAssets++;
           } else if (tooLarge) {
+            skipReason = 'size';
             skippedAssets++;
           } else if (asset.download_url) {
-            if (asset.size > 10 * 1024 * 1024) {
-              const assetMemCheck = hasEnoughMemory(
-                Math.ceil(asset.size / 1024 / 1024) + settings.min_free_memory_mb
+            const assetHost = hostnameFromAssetUrl(asset.download_url);
+            if (assetHost) {
+              const decision = classifyAssetHost(
+                assetHost,
+                assetExtraHosts,
+                settings
               );
-              if (!assetMemCheck.ok) {
+              if (decision === 'rejected') {
+                skipReason = 'rejected';
                 skippedAssets++;
-                continue;
+              } else if (decision === 'unknown') {
+                requestAssetHostApproval({
+                  hostname: assetHost,
+                  sample_url: asset.download_url,
+                  repo_label: label,
+                });
+                pendingHosts.add(assetHost);
+                awaitingHostApproval++;
+                skipReason = 'host';
               }
             }
-            // If file already exists (shared path from another user's sync), link it
-            if (fs.existsSync(assetPath)) {
-              downloaded = true;
-            } else {
-              downloaded = await downloadReleaseAsset(
-                asset.download_url,
-                assetPath,
-                { extraTrustedHosts: assetExtraHosts }
-              );
+
+            if (!skipReason) {
+              if (asset.size > 10 * 1024 * 1024) {
+                const assetMemCheck = hasEnoughMemory(
+                  Math.ceil(asset.size / 1024 / 1024) +
+                    settings.min_free_memory_mb
+                );
+                if (!assetMemCheck.ok) {
+                  skippedAssets++;
+                  skipReason = 'size';
+                }
+              }
+            }
+
+            if (!skipReason) {
+              // Shared path from another user's sync
+              if (fs.existsSync(assetPath)) {
+                downloaded = true;
+              } else {
+                downloaded = await downloadReleaseAsset(
+                  asset.download_url,
+                  assetPath,
+                  {
+                    extraTrustedHosts: assetExtraHosts,
+                    onUntrustedHost: (hostname, sampleUrl) => {
+                      requestAssetHostApproval({
+                        hostname,
+                        sample_url: sampleUrl,
+                        repo_label: label,
+                      });
+                      pendingHosts.add(hostname);
+                      awaitingHostApproval++;
+                    },
+                  }
+                );
+              }
             }
           }
 
-          addReleaseAsset({
-            release_id: releaseRow.id,
-            name: asset.name,
-            content_type: asset.content_type,
-            size: asset.size || null,
-            file_path: downloaded ? assetPath : null,
-            download_url: asset.download_url || null,
-          });
-          if (downloaded) newAssets++;
+          if (existing) {
+            if (downloaded) {
+              updateReleaseAsset(existing.id, {
+                file_path: assetPath,
+                size: asset.size || existing.size,
+                download_url: asset.download_url || existing.download_url,
+              });
+              newAssets++;
+            }
+          } else {
+            addReleaseAsset({
+              release_id: releaseRow.id,
+              name: asset.name,
+              content_type: asset.content_type,
+              size: asset.size || null,
+              file_path: downloaded ? assetPath : null,
+              download_url: asset.download_url || null,
+            });
+            if (downloaded) newAssets++;
+          }
         }
       }
 
       let releaseMsg = `releases: ${releases.length} fetched (${newReleases} new, ${newAssets} assets)`;
       if (skippedAssets > 0) releaseMsg += `, ${skippedAssets} skipped`;
+      if (awaitingHostApproval > 0) {
+        releaseMsg += `, ${awaitingHostApproval} awaiting domain approval (${[...pendingHosts].join(', ')})`;
+      }
       messages.push(releaseMsg);
 
       if (newReleaseTags.length > 0) {

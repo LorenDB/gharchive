@@ -73,6 +73,7 @@ You may still run:
 
 - Repo mirror + release asset archive (GitHub REST API, GitLab API, Forgejo/Codeberg API)
 - Arbitrary clone URLs: unknown hosts still mirror git; rich meta/releases when Forgejo/Gitea is detected via `/api/v1/version`
+- Asset download hosts: built-in CDNs + repo host trusted; other domains queue a UI approve/reject popup (`/api/asset-hosts`, settings lists)
 - File tree / blob browser from bare mirrors (`/api/repos/[id]/tree`, `/blob`, `/raw`)
 - Settings: auto-sync interval, asset download limits, memory thresholds
 - Lists/tags (local + imported from GitHub star lists via GraphQL)

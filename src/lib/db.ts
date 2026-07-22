@@ -95,6 +95,14 @@ export interface Settings {
 
   /** Admin-set global upper bound for max_asset_size_mb. 0 = no limit. */
   global_max_asset_size_mb: number;
+
+  /**
+   * Hostnames the user has approved for release-asset downloads
+   * (Forgejo CDN / alternate download domains beyond the repo host).
+   */
+  approved_asset_hosts: string[];
+  /** Hostnames the user has rejected — never download assets from these. */
+  rejected_asset_hosts: string[];
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -134,7 +142,18 @@ export const DEFAULT_SETTINGS: Settings = {
   storage_alert_min_free_mb: 1024,
 
   global_max_asset_size_mb: 0,
+
+  approved_asset_hosts: [],
+  rejected_asset_hosts: [],
 };
+
+/** Pending user prompt for an untrusted release-asset download host. */
+export interface PendingAssetHostApproval {
+  hostname: string;
+  sample_url: string;
+  repo_label: string;
+  first_seen_at: string;
+}
 
 export interface GithubAccount {
   username: string;
@@ -305,6 +324,15 @@ interface Data {
   repo_lists: RepoList[];
   /** Per-user linked GitHub accounts */
   github_accounts: Record<string, GithubAccount>;
+  /**
+   * Per-user queue of release-asset hosts awaiting approve/reject.
+   * Populated during sync when a Forgejo (or other) host serves assets
+   * from a domain outside the built-in + repo-host allowlist.
+   */
+  pending_asset_host_approvals_by_user: Record<
+    string,
+    PendingAssetHostApproval[]
+  >;
   // Legacy single-tenant fields (migrated away on load)
   settings?: Settings;
   github_account?: GithubAccount | null;
@@ -722,6 +750,12 @@ function migrate(raw: Record<string, unknown>): Data {
   if (!d.settings_by_user || typeof d.settings_by_user !== 'object') {
     d.settings_by_user = {};
   }
+  if (
+    !d.pending_asset_host_approvals_by_user ||
+    typeof d.pending_asset_host_approvals_by_user !== 'object'
+  ) {
+    d.pending_asset_host_approvals_by_user = {};
+  }
   if (d.settings && Object.keys(d.settings_by_user).length === 0) {
     d.settings_by_user[AUTOLOGIN_USER_ID] = {
       ...DEFAULT_SETTINGS,
@@ -1004,6 +1038,7 @@ function emptyData(): Data {
     lists: [],
     repo_lists: [],
     github_accounts: {},
+    pending_asset_host_approvals_by_user: {},
   };
 }
 
@@ -1903,6 +1938,93 @@ export function assetExists(releaseId: number, assetName: string): boolean {
   return data!.release_assets.some(
     (a) => a.release_id === releaseId && a.name === assetName
   );
+}
+
+export function findReleaseAsset(
+  releaseId: number,
+  assetName: string
+): ReleaseAsset | undefined {
+  load();
+  return data!.release_assets.find(
+    (a) => a.release_id === releaseId && a.name === assetName
+  );
+}
+
+export function updateReleaseAsset(
+  id: number,
+  updates: Partial<
+    Pick<ReleaseAsset, 'file_path' | 'size' | 'content_type' | 'download_url'>
+  >
+): void {
+  load();
+  const idx = data!.release_assets.findIndex((a) => a.id === id);
+  if (idx < 0) return;
+  Object.assign(data!.release_assets[idx], updates);
+  save();
+}
+
+/** All release assets (unscoped) — used for post-approval download pass. */
+export function getAllReleaseAssets(): ReleaseAsset[] {
+  return [...load().release_assets];
+}
+
+// ── Pending asset-host approvals ────────────────────────────────
+
+export function listPendingAssetHostsForUser(
+  userId?: string
+): PendingAssetHostApproval[] {
+  load();
+  const uid = userId ?? tryGetUserId() ?? AUTOLOGIN_USER_ID;
+  const list = data!.pending_asset_host_approvals_by_user[uid] || [];
+  return list.map((p) => ({ ...p }));
+}
+
+/**
+ * Upsert a pending host approval for the current user.
+ * @returns true if newly added (or sample_url refreshed)
+ */
+export function upsertPendingAssetHost(
+  pending: PendingAssetHostApproval
+): boolean {
+  load();
+  const uid = tryGetUserId() ?? AUTOLOGIN_USER_ID;
+  if (!data!.pending_asset_host_approvals_by_user[uid]) {
+    data!.pending_asset_host_approvals_by_user[uid] = [];
+  }
+  const list = data!.pending_asset_host_approvals_by_user[uid];
+  const host = pending.hostname.toLowerCase();
+  const existing = list.find((p) => p.hostname.toLowerCase() === host);
+  if (existing) {
+    // Keep earliest first_seen; refresh sample context
+    existing.sample_url = pending.sample_url;
+    existing.repo_label = pending.repo_label;
+    save();
+    return false;
+  }
+  list.push({
+    hostname: host,
+    sample_url: pending.sample_url,
+    repo_label: pending.repo_label,
+    first_seen_at: pending.first_seen_at,
+  });
+  // Cap queue so a hostile remote can't fill db.json
+  if (list.length > 50) {
+    list.splice(0, list.length - 50);
+  }
+  save();
+  return true;
+}
+
+export function removePendingAssetHost(hostname: string, userId?: string): void {
+  load();
+  const uid = userId ?? tryGetUserId() ?? AUTOLOGIN_USER_ID;
+  const list = data!.pending_asset_host_approvals_by_user[uid];
+  if (!list) return;
+  const host = hostname.toLowerCase();
+  data!.pending_asset_host_approvals_by_user[uid] = list.filter(
+    (p) => p.hostname.toLowerCase() !== host
+  );
+  save();
 }
 
 export function tagExists(archiveId: number, tagName: string): boolean {
