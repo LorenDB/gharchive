@@ -54,6 +54,7 @@ export type RepoCardData = {
   is_archived: boolean;
   is_private: boolean;
   is_fork: boolean;
+  remote_deleted_at: string | null;
   lists: RepoListSummary[];
 };
 
@@ -94,6 +95,7 @@ export function getRepoCards(listId: number | null = null): RepoCardData[] {
       is_archived: Boolean(rest.is_archived),
       is_private: Boolean(rest.is_private),
       is_fork: Boolean(rest.is_fork),
+      remote_deleted_at: rest.remote_deleted_at ?? null,
       lists: getRepoLists(rest.id).map((l) => ({
         id: l.id,
         name: l.name,

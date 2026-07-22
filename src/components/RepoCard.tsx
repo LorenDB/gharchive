@@ -29,6 +29,7 @@ interface Repo {
   is_archived?: boolean;
   is_private?: boolean;
   is_fork?: boolean;
+  remote_deleted_at?: string | null;
 }
 
 export default function RepoCard({ repo }: { repo: Repo }) {
@@ -41,7 +42,7 @@ export default function RepoCard({ repo }: { repo: Repo }) {
       href={`/repos/${repo.id}`}
       className={`group surface relative flex flex-col p-5 transition-all duration-200 hover:border-ink-600 hover:bg-ink-900 hover:-translate-y-0.5 hover:shadow-glow ${
         repo.is_archived ? 'border-amber-500/20' : ''
-      }`}
+      } ${repo.remote_deleted_at ? 'border-red-500/20' : ''}`}
     >
       <div className="flex items-start justify-between gap-3 mb-4">
         <div className="flex flex-wrap items-center gap-1.5 min-w-0">
@@ -62,14 +63,24 @@ export default function RepoCard({ repo }: { repo: Repo }) {
               archived
             </span>
           )}
+          {repo.remote_deleted_at && (
+            <span
+              className="badge bg-red-500/10 text-red-300 border border-red-500/30"
+              title={`Remote repository gone since ${repo.remote_deleted_at}`}
+            >
+              deleted
+            </span>
+          )}
         </div>
         <span
           className={`h-2 w-2 rounded-full mt-1.5 shrink-0 ${
-            repo.last_synced_at
-              ? 'bg-mint-400 shadow-[0_0_8px_rgba(94,207,154,0.5)]'
-              : 'bg-ink-600'
+            repo.remote_deleted_at
+              ? 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]'
+              : repo.last_synced_at
+                ? 'bg-mint-400 shadow-[0_0_8px_rgba(94,207,154,0.5)]'
+                : 'bg-ink-600'
           }`}
-          title={repo.last_synced_at ? 'Synced' : 'Never synced'}
+          title={repo.remote_deleted_at ? 'Deleted upstream' : repo.last_synced_at ? 'Synced' : 'Never synced'}
         />
       </div>
 

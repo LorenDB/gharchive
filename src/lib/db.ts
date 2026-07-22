@@ -221,6 +221,8 @@ export interface Archive {
   license?: string | null;
   is_archived?: boolean;
   is_fork?: boolean;
+  /** Set when the remote API or git fetch confirms the repo is gone. */
+  remote_deleted_at?: string | null;
   remote_updated_at?: string | null;
   remote_meta_synced_at?: string | null;
 }
@@ -268,6 +270,7 @@ export interface Repo {
   is_private?: boolean;
   is_archived?: boolean;
   is_fork?: boolean;
+  remote_deleted_at?: string | null;
   remote_updated_at?: string | null;
   remote_meta_synced_at?: string | null;
 }
@@ -411,6 +414,7 @@ function hydrateRepo(m: RepoMembership, archive: Archive | undefined): Repo {
     is_private: Boolean(archive.is_private),
     is_archived: Boolean(archive.is_archived),
     is_fork: Boolean(archive.is_fork),
+    remote_deleted_at: archive.remote_deleted_at ?? null,
     remote_updated_at: archive.remote_updated_at ?? null,
     remote_meta_synced_at: archive.remote_meta_synced_at ?? null,
   };
@@ -1632,6 +1636,7 @@ export type ArchiveUpdatableFields = Partial<
     | 'is_private'
     | 'is_archived'
     | 'is_fork'
+    | 'remote_deleted_at'
     | 'remote_updated_at'
     | 'remote_meta_synced_at'
   >

@@ -97,6 +97,7 @@ export async function syncRepo(
           subject: `archive:${archiveId}`,
           severity: 'failure',
         });
+        updateRepo(repo.id, { remote_deleted_at: new Date().toISOString() });
         return { ok: false, messages, error: 'Remote repository not found' };
       }
     }
@@ -129,6 +130,7 @@ export async function syncRepo(
           subject: `archive:${archiveId}`,
           severity: 'failure',
         });
+        updateRepo(repo.id, { remote_deleted_at: new Date().toISOString() });
         return { ok: false, messages, error: 'Remote repository not found' };
       }
 
@@ -171,6 +173,7 @@ export async function syncRepo(
           subject: `archive:${archiveId}`,
           severity: 'failure',
         });
+        updateRepo(repo.id, { remote_deleted_at: new Date().toISOString() });
         return { ok: false, messages, error: errMsg };
       }
 
