@@ -16,6 +16,8 @@ import {
   downloadReleaseAsset,
   getReleaseAssetPath,
 } from '@/lib/releases';
+import { checkRemoteRepoExists } from '@/lib/remote-exists';
+import { knownApiKind } from '@/lib/platform';
 import { fetchRemoteRepoMeta } from '@/lib/remote-meta';
 import { hasEnoughMemory } from '@/lib/memory';
 import { sendAlert, repoLabel } from '@/lib/alerts';
@@ -63,6 +65,40 @@ export async function syncRepo(
         message: `sync deferred (low memory): ${memCheck.reason}`,
       });
       return { ok: false, messages, error: `Low memory: ${memCheck.reason}` };
+    }
+
+    const apiKind = knownApiKind(repo.platform);
+    if (apiKind !== 'none') {
+      const existsResult = await checkRemoteRepoExists(
+        repo.platform,
+        repo.owner,
+        repo.name,
+        { cloneUrl: repo.clone_url }
+      );
+      if (existsResult.exists === false) {
+        messages.push(
+          `remote: repository not found via ${apiKind} API (${existsResult.statusCode})`
+        );
+        addSyncLog({
+          repo_id: repo.id,
+          status: 'failed',
+          message: messages.join('; '),
+        });
+        await sendAlert({
+          category: 'repo_deleted',
+          title: `Repo deleted: ${label}`,
+          body: [
+            `**${label}** appears to be gone or inaccessible on the remote.`,
+            '',
+            `The ${apiKind} API returned ${existsResult.statusCode}.`,
+            '',
+            'The local bare mirror and archived releases are still kept.',
+          ].join('\n'),
+          subject: `archive:${archiveId}`,
+          severity: 'failure',
+        });
+        return { ok: false, messages, error: 'Remote repository not found' };
+      }
     }
 
     try {
