@@ -1,23 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
-  getDb,
   findRepo,
-  findPublicArchive,
-  createArchive,
-  linkUserToArchive,
-  getRepoLists,
-  setRepoLists,
-  getLists,
   getList,
-  updateArchive,
 } from '@/lib/db';
-import { getMirrorPath, cloneMirror } from '@/lib/git';
 import { parseCloneUrl } from '@/lib/releases';
-import { syncRepo } from '@/lib/sync';
 import { withApiUser, checkRateLimit, checkCsrf } from '@/lib/api-auth';
 import { getImportStatus, enqueueRepoImport, type ImportItem } from '@/lib/import-stars';
-import { fetchRemoteRepoMeta } from '@/lib/remote-meta';
-import { tryGetUserId } from '@/lib/user-context';
 import { getRepoCards } from '@/lib/server-data';
 
 export async function GET(req: NextRequest) {
@@ -68,6 +56,7 @@ export async function POST(req: NextRequest) {
           owner,
           name: repo,
           clone_url,
+          platform,
           github_list_ids: [],
           local_list_names: listNames.length ? listNames : undefined,
         };
@@ -78,73 +67,19 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      // Probe privacy (best-effort) before choosing path / share decision
-      let isPrivate = false;
-      try {
-        const meta = await fetchRemoteRepoMeta(platform, owner, repo);
-        if (meta) isPrivate = Boolean(meta.is_private);
-      } catch {
-        // treat as public for path choice
-      }
+      // Start async import so placeholder shows on dashboard immediately
+      const item: ImportItem = {
+        owner,
+        name: repo,
+        clone_url,
+        platform,
+        github_list_ids: [],
+      };
+      const job = enqueueRepoImport(item);
 
-      let newRepo;
-      let linkedOnly = false;
-
-      if (!isPrivate) {
-        const shared = findPublicArchive(platform, owner, repo);
-        if (shared) {
-          newRepo = linkUserToArchive(shared.id, {});
-          linkedOnly = true;
-        }
-      }
-
-      if (!newRepo) {
-        const mirrorPath = getMirrorPath(platform, owner, repo, {
-          isPrivate,
-          userId: tryGetUserId() || undefined,
-        });
-        await cloneMirror(clone_url, mirrorPath);
-
-        const archive = createArchive({
-          platform,
-          owner,
-          name: repo,
-          clone_url,
-          mirror_path: mirrorPath,
-          last_synced_at: null,
-          is_private: isPrivate,
-        });
-        newRepo = linkUserToArchive(archive.id, {});
-      }
-
-      if (Array.isArray(body.list_ids) && body.list_ids.length) {
-        const valid = new Set(getLists().map((l) => l.id));
-        setRepoLists(
-          newRepo.id,
-          body.list_ids
-            .map((n: any) => parseInt(n, 10))
-            .filter((id: number) => valid.has(id))
-        );
-      }
-
-      try {
-        await syncRepo(newRepo, { skipGit: linkedOnly ? false : true });
-      } catch (syncErr: any) {
-        console.error('Initial sync after add failed:', syncErr?.message);
-      }
-
-      // Refresh privacy from meta if we linked or just synced
-      const fresh = getDb().repos.find((r) => r.id === newRepo!.id) || newRepo;
-      // If meta revealed private after creating a public archive, mark it —
-      // only safe when this is the sole member (always true for new create).
-      if (fresh.is_private && fresh.archive_id) {
-        updateArchive(fresh.archive_id, { is_private: true });
-      }
-
-      const { mirror_path, clone_url: _, ...safe } = fresh;
       return NextResponse.json(
-        { ...safe, lists: getRepoLists(fresh.id), linked: linkedOnly },
-        { status: 201 }
+        { queued: true, message: 'Import started', job },
+        { status: 202 }
       );
     } catch (err: any) {
       return NextResponse.json({ error: err.message }, { status: 400 });

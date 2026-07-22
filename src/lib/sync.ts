@@ -39,7 +39,7 @@ export interface RepoLike {
  */
 export async function syncRepo(
   repo: RepoLike,
-  options: { skipGit?: boolean } = {}
+  options: { skipGit?: boolean; onProgress?: (detail: string) => void } = {}
 ): Promise<{ ok: boolean; messages: string[]; error?: string }> {
   const messages: string[] = [];
   const settings = getSettings();
@@ -229,7 +229,15 @@ export async function syncRepo(
         ? settings.max_asset_size_mb * 1024 * 1024
         : Infinity;
 
+    options.onProgress?.(`Fetching ${releases.length} releases...`);
+
+    let releaseIdx = 0;
     for (const rel of releases) {
+      releaseIdx++;
+      options.onProgress?.(
+        `Downloading release ${releaseIdx}/${releases.length}`
+      );
+
       if (!dbTagExists(archiveId, rel.tag_name)) {
         addRelease({
           archive_id: archiveId,

@@ -3,16 +3,25 @@ import { fetchStarsPreview } from '@/lib/github';
 import {
   startStarImport,
   getImportStatus,
+  getPendingItems,
   cancelImport,
   itemsFromSelection,
   requireGithubToken,
   scanAndMaybeImportStars,
 } from '@/lib/import-stars';
 import { withApiUser, checkRateLimit, checkCsrf } from '@/lib/api-auth';
+import { tryGetUserId } from '@/lib/user-context';
 
 export async function GET() {
   return withApiUser(async () => {
-    return NextResponse.json({ job: getImportStatus() });
+    const job = getImportStatus();
+    const userId = tryGetUserId();
+    return NextResponse.json({
+      job: {
+        ...job,
+        pending_items: getPendingItems(userId ?? undefined),
+      },
+    });
   });
 }
 
@@ -120,6 +129,10 @@ export async function DELETE(req: NextRequest) {
 
   return withApiUser(async () => {
     const job = cancelImport();
-    return NextResponse.json({ ok: true, job });
+    const userId = tryGetUserId();
+    return NextResponse.json({
+      ok: true,
+      job: { ...job, pending_items: getPendingItems(userId ?? undefined) },
+    });
   });
 }

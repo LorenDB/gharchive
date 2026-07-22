@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { formatRelativeTime } from '@/lib/format';
 import { languageColor } from '@/lib/language-colors';
+import type { PendingItem } from '@/lib/import-stars';
 
 interface ListBadge {
   id: number;
@@ -143,5 +144,66 @@ function ClockIcon() {
     <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 16 16" aria-hidden>
       <path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Zm7-3.25v2.992l2.028.812a.75.75 0 0 1-.557 1.392l-2.5-1A.751.751 0 0 1 7 8.25v-3.5a.75.75 0 0 1 1.5 0Z" />
     </svg>
+  );
+}
+
+function phaseLabel(item: PendingItem): string {
+  if (item.phase === 'queued') return 'Awaiting import…';
+  if (item.phase === 'cloning') return 'Cloning repo…';
+  if (item.detail) return item.detail;
+  return 'Syncing releases…';
+}
+
+export function PendingCard({ item }: { item: PendingItem }) {
+  const isGithub = item.platform === 'github';
+  const label = phaseLabel(item);
+
+  return (
+    <div className="surface relative flex flex-col p-5 opacity-60">
+      <div className="flex items-start justify-between gap-3 mb-4">
+        <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+          <span
+            className={`badge ${
+              isGithub
+                ? 'bg-ink-850 text-ink-200 border border-ink-700'
+                : 'bg-orange-500/10 text-orange-300 border border-orange-500/25'
+            }`}
+          >
+            {isGithub ? 'GitHub' : 'GitLab'}
+          </span>
+        </div>
+        <span className="h-2 w-2 rounded-full mt-1.5 shrink-0 bg-amber-400 animate-pulse" />
+      </div>
+
+      <h2 className="font-mono text-[15px] leading-snug text-ink-300">
+        <span className="text-ink-500">{item.owner}</span>
+        <span className="text-ink-600 mx-0.5">/</span>
+        <span className="font-semibold text-ink-300">{item.name}</span>
+      </h2>
+
+      <p className="mt-3 text-xs text-ink-500 flex items-center gap-2">
+        <svg
+          className="h-3.5 w-3.5 animate-spin text-amber-400/70"
+          viewBox="0 0 24 24"
+          fill="none"
+          aria-hidden
+        >
+          <circle
+            className="opacity-25"
+            cx="12"
+            cy="12"
+            r="10"
+            stroke="currentColor"
+            strokeWidth="3"
+          />
+          <path
+            className="opacity-75"
+            fill="currentColor"
+            d="M4 12a8 8 0 018-8v3a5 5 0 00-5 5H4z"
+          />
+        </svg>
+        {label}
+      </p>
+    </div>
   );
 }

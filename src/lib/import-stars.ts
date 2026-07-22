@@ -34,6 +34,7 @@ export interface ImportItem {
   owner: string;
   name: string;
   clone_url: string;
+  platform?: 'github' | 'gitlab';
   /** GitHub list GraphQL ids to assign (may be empty = unlisted / no list) */
   github_list_ids: string[];
   /** Local list names to ensure/create and assign (optional) */
@@ -44,6 +45,19 @@ export interface ImportItem {
   is_private?: boolean;
   /** User who enqueued this item (for round-robin scheduling) */
   userId?: string;
+}
+
+export const PENDING_PHASES = ['queued', 'cloning', 'releases'] as const;
+export type PendingPhase = (typeof PENDING_PHASES)[number];
+
+export interface PendingItem {
+  owner: string;
+  name: string;
+  clone_url: string;
+  platform: 'github' | 'gitlab';
+  phase: PendingPhase;
+  detail: string | null;
+  userId: string;
 }
 
 export interface ImportJobStatus {
@@ -57,6 +71,7 @@ export interface ImportJobStatus {
   started_at: string | null;
   finished_at: string | null;
   source: string | null;
+  pending_items: PendingItem[];
 }
 
 type JobState = ImportJobStatus & {
@@ -68,6 +83,8 @@ type JobState = ImportJobStatus & {
   lastServedUser: string | null;
   /** Set to true to cancel a running job */
   cancelled: boolean;
+  /** Per-item progress tracking. Keyed by `owner/name`. */
+  _pending: Map<string, PendingItem>;
 };
 
 const g = globalThis as typeof globalThis & {
@@ -87,14 +104,18 @@ function job(): JobState {
       started_at: null,
       finished_at: null,
       source: null,
+      pending_items: [],
       queue: [],
       listMap: new Map(),
       userId: null,
       lastServedUser: null,
       cancelled: false,
+      _pending: new Map(),
     };
   }
-  return g.__gharchiveImportJob;
+  const j = g.__gharchiveImportJob;
+  if (!j._pending) j._pending = new Map();
+  return j;
 }
 
 export function getImportStatus(): ImportJobStatus {
@@ -110,6 +131,7 @@ export function getImportStatus(): ImportJobStatus {
     started_at: j.started_at,
     finished_at: j.finished_at,
     source: j.source,
+    pending_items: [...j._pending.values()],
   };
 }
 
@@ -118,8 +140,26 @@ export function cancelImport(): ImportJobStatus {
   if (j.running) {
     j.cancelled = true;
     j.queue = [];
+    j._pending.clear();
   }
   return getImportStatus();
+}
+
+export function getPendingItems(userId?: string): PendingItem[] {
+  const j = job();
+  const all = [...j._pending.values()];
+  if (!userId) return all;
+  return all.filter((p) => p.userId === userId);
+}
+
+function setPendingItem(fullName: string, item: PendingItem) {
+  const j = job();
+  j._pending.set(fullName, item);
+}
+
+function removePendingItem(fullName: string) {
+  const j = job();
+  j._pending.delete(fullName);
 }
 
 export function ensureGithubLists(
@@ -143,10 +183,22 @@ export function enqueueRepoImport(item: ImportItem): ImportJobStatus {
   const j = job();
   const userId = getRequiredUserId();
   item.userId = userId;
+  item.platform = item.platform || 'github';
+
+  const fullName = `${item.owner}/${item.name}`;
 
   if (j.running) {
     j.queue.unshift(item);
     j.total++;
+    setPendingItem(fullName, {
+      owner: item.owner,
+      name: item.name,
+      clone_url: item.clone_url,
+      platform: item.platform,
+      phase: 'queued',
+      detail: null,
+      userId,
+    });
     return getImportStatus();
   }
 
@@ -165,6 +217,17 @@ export function enqueueRepoImport(item: ImportItem): ImportJobStatus {
   j.cancelled = false;
   j.queue = [item];
   j.listMap = new Map();
+  j._pending = new Map();
+
+  setPendingItem(fullName, {
+    owner: item.owner,
+    name: item.name,
+    clone_url: item.clone_url,
+    platform: item.platform,
+    phase: 'queued',
+    detail: null,
+    userId,
+  });
 
   processQueue()
     .catch((err) => {
@@ -206,6 +269,20 @@ export function startStarImport(
   j.cancelled = false;
   j.queue = items.map((i) => ({ ...i, userId: i.userId ?? userId, from_star: i.from_star ?? true }));
   j.listMap = ensureGithubLists(githubLists);
+  j._pending = new Map();
+
+  for (const item of j.queue) {
+    const fullName = `${item.owner}/${item.name}`;
+    setPendingItem(fullName, {
+      owner: item.owner,
+      name: item.name,
+      clone_url: item.clone_url,
+      platform: item.platform || 'github',
+      phase: 'queued',
+      detail: null,
+      userId: item.userId || userId,
+    });
+  }
 
   processQueue()
     .then(() => {
@@ -248,6 +325,7 @@ export async function runImportAwait(
       started_at: new Date().toISOString(),
       finished_at: new Date().toISOString(),
       source,
+      pending_items: [],
     };
   }
 
@@ -268,6 +346,20 @@ export async function runImportAwait(
   j.cancelled = false;
   j.queue = items.map((i) => ({ ...i, userId: i.userId ?? userId }));
   j.listMap = ensureGithubLists(githubLists);
+  j._pending = new Map();
+
+  for (const item of j.queue) {
+    const fullName = `${item.owner}/${item.name}`;
+    setPendingItem(fullName, {
+      owner: item.owner,
+      name: item.name,
+      clone_url: item.clone_url,
+      platform: item.platform || 'github',
+      phase: 'queued',
+      detail: null,
+      userId: item.userId || userId,
+    });
+  }
 
   try {
     await processQueue();
@@ -366,6 +458,7 @@ async function processQueue() {
           j.errors.push({ repo: full, error: err?.message || String(err) });
           console.error(`[import] ${full}:`, err?.message || err);
         }
+        removePendingItem(full);
       }
     });
   }
@@ -373,14 +466,26 @@ async function processQueue() {
   j.current = j.cancelled ? 'cancelled' : null;
   j.running = false;
   j.finished_at = new Date().toISOString();
+  if (j.cancelled) {
+    j._pending.clear();
+  }
 }
 
 async function importOne(item: ImportItem, listMap: Map<string, List>) {
   const existing = findRepo('github', item.owner, item.name);
+  const fullName = `${item.owner}/${item.name}`;
+  const platform = item.platform || 'github';
+
+  const setPhase = (phase: PendingPhase, detail: string | null = null) => {
+    const current = job()._pending.get(fullName);
+    if (current) {
+      current.phase = phase;
+      current.detail = detail;
+    }
+  };
 
   const listIds: number[] = [];
   for (const gid of item.github_list_ids) {
-    // Prefer current-user lookup; listMap may belong to another user in multi-user queues
     const cached = listMap.get(gid);
     const local =
       getListByGithubId(gid) ||
@@ -403,6 +508,7 @@ async function importOne(item: ImportItem, listMap: Map<string, List>) {
     if (listIds.length) {
       for (const lid of listIds) addRepoToList(existing.id, lid);
     }
+    removePendingItem(fullName);
     const err: any = new Error('Already archived — lists updated');
     err.code = 'SKIPPED';
     throw err;
@@ -427,6 +533,7 @@ async function importOne(item: ImportItem, listMap: Map<string, List>) {
   }
 
   if (!repo) {
+    setPhase('cloning');
     const mirrorPath = getMirrorPath('github', item.owner, item.name, {
       isPrivate,
       userId: tryGetUserId() || undefined,
@@ -451,15 +558,20 @@ async function importOne(item: ImportItem, listMap: Map<string, List>) {
     setRepoLists(repo.id, listIds);
   }
 
+  setPhase('releases');
   try {
-    // Fresh clone: skip git. Linked to existing shared archive: light refresh ok.
-    await syncRepo(repo, { skipGit: !linkedOnly });
+    await syncRepo(repo, {
+      skipGit: !linkedOnly,
+      onProgress: (detail) => setPhase('releases', detail),
+    });
   } catch (e: any) {
     console.warn(
       `[import] release sync for ${item.owner}/${item.name}:`,
       e?.message
     );
   }
+
+  removePendingItem(fullName);
 }
 
 export function itemsFromSelection(

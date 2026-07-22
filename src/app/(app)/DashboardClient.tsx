@@ -1,11 +1,12 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import RepoCard from '@/components/RepoCard';
+import RepoCard, { PendingCard } from '@/components/RepoCard';
 import AddRepoForm from '@/components/AddRepoForm';
 import type { ListFilterData, RepoCardData } from '@/lib/server-data';
+import type { PendingItem } from '@/lib/import-stars';
 
 export default function DashboardClient({
   initialRepos,
@@ -20,6 +21,7 @@ export default function DashboardClient({
   const [repos, setRepos] = useState(initialRepos);
   const [lists, setLists] = useState(initialLists);
   const [loading, setLoading] = useState(false);
+  const [pending, setPending] = useState<PendingItem[]>([]);
 
   // Soft navigation (list filter) re-renders the server page with new props
   useEffect(() => {
@@ -50,9 +52,35 @@ export default function DashboardClient({
     }
   }, [activeListId]);
 
+  // Poll for pending import items
+  const pollPending = useCallback(async () => {
+    try {
+      const res = await fetch('/api/github/import');
+      const data = await res.json();
+      setPending(data.job?.pending_items || []);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    pollPending();
+    const t = setInterval(pollPending, 2000);
+    return () => clearInterval(t);
+  }, [pollPending]);
+
+  // Refresh repo list when pending items change (imports finish)
+  const prevPendingLen = useRef(pending.length);
+  useEffect(() => {
+    if (pending.length !== prevPendingLen.current) {
+      prevPendingLen.current = pending.length;
+      fetchData();
+    }
+  }, [pending.length, fetchData]);
+
   async function refresh() {
     setLoading(true);
-    await fetchData();
+    await Promise.all([fetchData(), pollPending()]);
     router.refresh();
   }
 
@@ -77,11 +105,11 @@ export default function DashboardClient({
           <p className="page-subtitle">
             {loading
               ? 'Loading archive…'
-              : repos.length === 0
+              : repos.length === 0 && pending.length === 0
                 ? activeList
                   ? 'No repositories in this list.'
                   : 'Your vault is empty — add a repository to begin.'
-                : `${repos.length} archived · ${synced} synced`}
+                : `${repos.length} archived · ${synced} synced${pending.length > 0 ? ` · ${pending.length} importing` : ''}`}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -124,7 +152,7 @@ export default function DashboardClient({
             <div key={i} className="surface h-36 animate-pulse bg-ink-900/40" />
           ))}
         </div>
-      ) : repos.length === 0 ? (
+      ) : repos.length === 0 && pending.length === 0 ? (
         <div className="surface relative overflow-hidden px-6 py-16 text-center">
           <div className="absolute inset-0 bg-gradient-to-b from-amber-400/5 to-transparent pointer-events-none" />
           <div className="relative mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-ink-850 border border-ink-700 text-amber-400 mb-5 shadow-glow">
@@ -147,6 +175,12 @@ export default function DashboardClient({
         </div>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {pending.map((item) => (
+            <PendingCard
+              key={`pending-${item.owner}/${item.name}`}
+              item={item}
+            />
+          ))}
           {repos.map((repo) => (
             <RepoCard key={repo.id} repo={repo} />
           ))}
