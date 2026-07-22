@@ -29,8 +29,17 @@ function safeReturnTo(path: string | null | undefined): string {
     return '/';
   }
   if (/[\0\r\n\\]/.test(path)) return '/';
+  // Reject any path that starts with a protocol scheme after the leading /
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(path.slice(1))) return '/';
   if (path.length > 512) return '/';
-  return path;
+  // Normalize to prevent open redirect via path traversal (/foo/../../evil.com)
+  try {
+    const normalized = new URL(path, 'http://localhost').pathname;
+    if (!normalized.startsWith('/') || normalized.startsWith('//')) return '/';
+    return normalized;
+  } catch {
+    return '/';
+  }
 }
 
 /** User-facing error only — never leak token exchange / internal details. */
@@ -93,6 +102,19 @@ export async function GET(req: NextRequest) {
       codeVerifier: oauth.codeVerifier,
     });
 
+    // Always validate id_token nonce to prevent replay attacks (OIDC Core §3.1.3.7),
+    // even when userinfo is the primary claims source.
+    if (tokens.id_token) {
+      const idClaims = decodeJwtPayload(tokens.id_token, {
+        expectedIssuer: meta.issuer,
+        expectedClientId: config.clientId,
+        expectedNonce: oauth.nonce,
+      });
+      if (!idClaims?.sub) {
+        return redirectLoginError('Invalid id_token from OIDC provider');
+      }
+    }
+
     let claims: OidcClaims | null = null;
     if (meta.userinfo_endpoint && tokens.access_token) {
       try {
@@ -105,6 +127,7 @@ export async function GET(req: NextRequest) {
       claims = decodeJwtPayload(tokens.id_token, {
         expectedIssuer: meta.issuer,
         expectedClientId: config.clientId,
+        expectedNonce: oauth.nonce,
       });
     }
     if (!claims?.sub) {

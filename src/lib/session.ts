@@ -26,6 +26,7 @@ export interface SessionPayload {
 export interface OAuthStatePayload {
   state: string;
   codeVerifier: string;
+  nonce: string;
   returnTo: string;
   /** Unix seconds */
   exp: number;
@@ -193,12 +194,14 @@ export async function readSessionToken(
 export async function createOAuthStateToken(
   state: string,
   codeVerifier: string,
+  nonce: string,
   returnTo: string
 ): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   const payload: OAuthStatePayload = {
     state,
     codeVerifier,
+    nonce,
     returnTo,
     exp: now + OAUTH_MAX_AGE_SEC,
   };
@@ -209,7 +212,7 @@ export async function readOAuthStateToken(
   token: string | undefined | null
 ): Promise<OAuthStatePayload | null> {
   const payload = await unsealPayload<OAuthStatePayload>(token);
-  if (!payload?.state || !payload.codeVerifier) return null;
+  if (!payload?.state || !payload.codeVerifier || !payload.nonce) return null;
   if (payload.exp < Math.floor(Date.now() / 1000)) return null;
   return payload;
 }
@@ -242,6 +245,7 @@ export function clearCookieOptions() {
     sameSite: 'lax' as const,
     path: '/',
     maxAge: 0,
+    expires: new Date(0),
   };
 }
 

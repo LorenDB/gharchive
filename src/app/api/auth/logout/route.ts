@@ -6,14 +6,19 @@ import {
 } from '@/lib/session';
 import { appUrl, isOidcConfigured } from '@/lib/oidc';
 
-export async function GET(_req: NextRequest) {
+export async function GET() {
   const url = appUrl(isOidcConfigured() ? '/login' : '/');
-  const res = NextResponse.redirect(url);
+  return NextResponse.redirect(url);
+}
+
+function clearSession(res: NextResponse): void {
   res.cookies.set(SESSION_COOKIE, '', clearCookieOptions());
   res.cookies.set(OAUTH_COOKIE, '', clearCookieOptions());
-  return res;
 }
 
 export async function POST(req: NextRequest) {
-  return GET(req);
+  const url = appUrl(isOidcConfigured() ? '/login' : '/');
+  const res = NextResponse.redirect(url);
+  clearSession(res);
+  return res;
 }

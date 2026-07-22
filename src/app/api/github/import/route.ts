@@ -19,7 +19,7 @@ export async function GET() {
 /**
  * Start importing selected starred repos, or run a scheduled-style scan.
  * Body:
- * - { scan: true, force_import?: boolean } — scan all stars; import if force_import or setting
+ * - { scan: true, force_import?: boolean } — scan all stars; import only if force_import is true
  * - { full_names: string[], list_ids?: string[] } — manual selection
  */
 export async function POST(req: NextRequest) {
@@ -30,12 +30,17 @@ export async function POST(req: NextRequest) {
 
   return withApiUser(async () => {
     try {
-      const body = await req.json().catch(() => ({}));
+      const raw = await req.text();
+      if (raw.length > 1_000_000) {
+        return NextResponse.json({ error: 'Request body too large' }, { status: 413 });
+      }
+      const body = JSON.parse(raw);
 
       if (body.scan) {
-        const result = await scanAndMaybeImportStars({
-          forceImport: Boolean(body.force_import ?? true),
-        });
+        const forceImport = typeof body.force_import === 'boolean'
+          ? body.force_import
+          : false;
+        const result = await scanAndMaybeImportStars({ forceImport });
         return NextResponse.json({ ok: true, result, job: getImportStatus() });
       }
 
@@ -47,16 +52,21 @@ export async function POST(req: NextRequest) {
       }
 
       let fullNames: string[] = Array.isArray(body.full_names)
-        ? body.full_names
+        ? body.full_names.filter(
+            (n: unknown): n is string => typeof n === 'string' && /^[\w.-]+\/[\w.-]+$/.test(n)
+          )
         : [];
 
       const token = requireGithubToken();
       const preview = await fetchStarsPreview(token);
 
       if (Array.isArray(body.list_ids) && body.list_ids.length > 0) {
+        const listIds: string[] = body.list_ids.filter(
+          (id: unknown): id is string => typeof id === 'string'
+        );
         const fromLists = new Set<string>();
         for (const list of preview.lists) {
-          if (body.list_ids.includes(list.id)) {
+          if (listIds.includes(list.id)) {
             for (const r of list.repos) fromLists.add(r);
           }
         }
@@ -96,7 +106,8 @@ export async function POST(req: NextRequest) {
 
       return NextResponse.json({ ok: true, job, selected: items.length });
     } catch (err: any) {
-      return NextResponse.json({ error: err.message }, { status: 400 });
+      const message = err?.message || 'Internal error';
+      return NextResponse.json({ error: message }, { status: 400 });
     }
   });
 }

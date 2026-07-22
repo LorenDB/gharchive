@@ -41,6 +41,7 @@ export interface OidcClaims {
   groups?: string[];
   iss?: string;
   aud?: string | string[];
+  nonce?: string;
 }
 
 let metadataCache: { issuer: string; meta: OidcMetadata; fetchedAt: number } | null =
@@ -124,14 +125,16 @@ export function buildAuthorizationUrl(opts: {
   config: OidcConfig;
   state: string;
   codeChallenge: string;
+  nonce: string;
 }): string {
-  const { meta, config, state, codeChallenge } = opts;
+  const { meta, config, state, codeChallenge, nonce } = opts;
   const params = new URLSearchParams({
     client_id: config.clientId,
     response_type: 'code',
     scope: config.scopes,
     redirect_uri: config.redirectUri,
     state,
+    nonce,
     code_challenge: codeChallenge,
     code_challenge_method: 'S256',
   });
@@ -213,11 +216,11 @@ function rawDecodeJwtPayload(jwt: string): OidcClaims | null {
 /**
  * Decode and validate id_token JWT payload.
  * Always prefer fetchUserInfo over this fallback. Must pass
- * basic structural checks; callers should validate iss/aud.
+ * basic structural checks; callers should validate iss/aud/nonce.
  */
 export function decodeJwtPayload(
   jwt: string,
-  opts?: { expectedIssuer?: string; expectedClientId?: string }
+  opts?: { expectedIssuer?: string; expectedClientId?: string; expectedNonce?: string }
 ): OidcClaims | null {
   const claims = rawDecodeJwtPayload(jwt);
   if (!claims?.sub) return null;
@@ -231,6 +234,18 @@ export function decodeJwtPayload(
     const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
     if (claims.aud && !aud.includes(opts.expectedClientId)) {
       console.error('[oidc] id_token aud mismatch:', claims.aud, 'expected:', opts.expectedClientId);
+      return null;
+    }
+  }
+
+  // Validate nonce to prevent id_token replay attacks (OIDC Core 1.0 §3.1.3.7)
+  if (opts?.expectedNonce) {
+    if (!claims.nonce) {
+      console.error('[oidc] id_token missing nonce claim');
+      return null;
+    }
+    if (claims.nonce !== opts.expectedNonce) {
+      console.error('[oidc] id_token nonce mismatch');
       return null;
     }
   }

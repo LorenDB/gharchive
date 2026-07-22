@@ -105,11 +105,12 @@ describe('createSessionToken / readSessionToken', () => {
 
 describe('OAuth state tokens', () => {
   it('round-trips an OAuth state token', async () => {
-    const token = await createOAuthStateToken('state123', 'verifier456', '/dashboard');
+    const token = await createOAuthStateToken('state123', 'verifier456', 'nonce789', '/dashboard');
     const result = await readOAuthStateToken(token);
     expect(result).toBeTruthy();
     expect(result!.state).toBe('state123');
     expect(result!.codeVerifier).toBe('verifier456');
+    expect(result!.nonce).toBe('nonce789');
     expect(result!.returnTo).toBe('/dashboard');
   });
 
