@@ -58,12 +58,6 @@ export default async function LoginPage({
           Continue with SSO
         </a>
 
-        <p className="hint text-center mt-6">
-          Configure <code className="text-ink-300">OIDC_*</code> environment
-          variables to control this provider. See{' '}
-          <code className="text-ink-300">.env.example</code>.
-        </p>
-
         <p className="text-center mt-4">
           <Link
             href="/"
