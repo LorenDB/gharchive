@@ -760,26 +760,57 @@ function migrate(raw: Record<string, unknown>): Data {
   return d;
 }
 
-function load(): Data {
-  if (data) return data;
-  const dataDir = getDataDir();
-  const dbPath = getDbPath();
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
-  }
-  if (fs.existsSync(dbPath)) {
-    const raw = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
-    const prevVersion = Number(raw.schema_version) || 0;
-    data = migrate(raw);
-    // Persist when schema advanced (or first load still missing archives)
-    if (prevVersion < SCHEMA_VERSION) {
-      save();
-    }
-  } else {
-    data = emptyData();
-  }
-  const d = data!;
+function getDbBakPath(): string {
+  return getDbPath() + '.bak';
+}
 
+function getDbTmpPath(): string {
+  return getDbPath() + '.tmp';
+}
+
+/**
+ * Parse + migrate a db file. Returns null on missing file or JSON/schema errors.
+ */
+function readDbFile(filePath: string): { data: Data; prevVersion: number } | null {
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    const text = fs.readFileSync(filePath, 'utf8');
+    if (!text.trim()) {
+      console.error(`[db] empty file: ${filePath}`);
+      return null;
+    }
+    const raw = JSON.parse(text);
+    const prevVersion = Number(raw.schema_version) || 0;
+    return { data: migrate(raw), prevVersion };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[db] failed to parse ${filePath}: ${msg}`);
+    return null;
+  }
+}
+
+/**
+ * Move a corrupt primary db out of the way so a fresh file can be written.
+ * Keeps the bytes for manual recovery.
+ */
+function quarantineCorruptDb(dbPath: string): string | null {
+  if (!fs.existsSync(dbPath)) return null;
+  const dest = `${dbPath}.corrupt-${Date.now()}`;
+  try {
+    fs.renameSync(dbPath, dest);
+    console.error(
+      `[db] quarantined corrupt database to ${dest}. ` +
+        `Restore a known-good backup or re-import; a new empty db will be created.`
+    );
+    return dest;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[db] could not quarantine ${dbPath}: ${msg}`);
+    return null;
+  }
+}
+
+function recomputeNextIds(d: Data): void {
   nextIds.repos = d.repos.reduce((max, r) => Math.max(max, r.id), 0) + 1;
   nextIds.archives =
     d.archives.reduce((max, a) => Math.max(max, a.id), 0) + 1;
@@ -788,7 +819,57 @@ function load(): Data {
     d.release_assets.reduce((max, r) => Math.max(max, r.id), 0) + 1;
   nextIds.sync_logs = d.sync_logs.reduce((max, r) => Math.max(max, r.id), 0) + 1;
   nextIds.lists = d.lists.reduce((max, r) => Math.max(max, r.id), 0) + 1;
-  return d;
+}
+
+function load(): Data {
+  if (data) return data;
+  const dataDir = getDataDir();
+  const dbPath = getDbPath();
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
+  }
+
+  // Drop leftover partial write from a crash mid-save
+  const tmpPath = getDbTmpPath();
+  if (fs.existsSync(tmpPath)) {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch {
+      // ignore
+    }
+  }
+
+  let prevVersion = 0;
+  const primary = readDbFile(dbPath);
+  if (primary) {
+    data = primary.data;
+    prevVersion = primary.prevVersion;
+  } else {
+    // Primary missing or corrupt — try last successful backup
+    const backup = readDbFile(getDbBakPath());
+    if (backup) {
+      console.warn(`[db] restored from ${getDbBakPath()}`);
+      data = backup.data;
+      prevVersion = backup.prevVersion;
+      // Rewrite primary immediately so the next boot uses it
+      save();
+    } else {
+      if (fs.existsSync(dbPath)) {
+        quarantineCorruptDb(dbPath);
+      }
+      data = emptyData();
+      prevVersion = SCHEMA_VERSION;
+      save();
+    }
+  }
+
+  // Persist when schema advanced
+  if (prevVersion < SCHEMA_VERSION) {
+    save();
+  }
+
+  recomputeNextIds(data!);
+  return data!;
 }
 
 /**
@@ -825,12 +906,45 @@ function emptyData(): Data {
   };
 }
 
+/**
+ * Atomic save: write to db.json.tmp, fsync, rename over db.json.
+ * After a successful replace, copies the new primary to db.json.bak.
+ *
+ * Direct writeFileSync(db.json) is unsafe — a kill/OOM mid-write leaves
+ * truncated JSON ("Unterminated string") and takes the app down.
+ *
+ * Order matters: never copy primary → bak *before* the rename, or a corrupt
+ * primary would clobber a good backup during recovery.
+ */
 function save() {
-  if (data) {
-    const dbPath = getDbPath();
-    const dir = path.dirname(dbPath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(dbPath, JSON.stringify(data, null, 2));
+  if (!data) return;
+
+  const dbPath = getDbPath();
+  const tmpPath = getDbTmpPath();
+  const bakPath = getDbBakPath();
+  const dir = path.dirname(dbPath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+  const payload = JSON.stringify(data, null, 2);
+
+  // 1. Write temp file fully, then fsync so the bytes hit disk
+  const fd = fs.openSync(tmpPath, 'w');
+  try {
+    fs.writeFileSync(fd, payload, 'utf8');
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  // 2. Atomic replace on the same filesystem (POSIX rename is atomic)
+  fs.renameSync(tmpPath, dbPath);
+
+  // 3. Snapshot the new good primary as .bak (best-effort)
+  try {
+    fs.copyFileSync(dbPath, bakPath);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[db] could not update ${bakPath}: ${msg}`);
   }
 }
 
