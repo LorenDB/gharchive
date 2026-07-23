@@ -189,6 +189,11 @@ export async function PUT(req: NextRequest) {
         patch.global_max_asset_size_mb = Math.round(n);
       }
 
+      // Storage compression for release assets (admin only)
+      if (typeof body.compress_release_assets === 'boolean' && userIsAdmin) {
+        patch.compress_release_assets = body.compress_release_assets;
+      }
+
       // GitHub scan / auto-import
       for (const key of [
         'auto_scan_stars_enabled',

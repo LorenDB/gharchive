@@ -9,6 +9,10 @@ import {
   isPathInside,
   parseTrustedAssetUrl,
 } from '@/lib/safe-url';
+import {
+  decompressFromStorage,
+  isStorageCompressedPath,
+} from '@/lib/asset-compression';
 
 export async function GET(
   _req: NextRequest,
@@ -76,15 +80,34 @@ export async function GET(
         );
       }
 
-      const buffer = fs.readFileSync(asset.file_path);
+      const onDisk = fs.readFileSync(asset.file_path);
+      const wasCompressed =
+        Boolean(asset.storage_compressed) ||
+        isStorageCompressedPath(asset.file_path);
+      let body: Buffer = onDisk;
+      if (wasCompressed) {
+        try {
+          body = decompressFromStorage(onDisk);
+        } catch (err) {
+          console.error(
+            `[assets] failed to decompress storage asset ${asset.id}:`,
+            err
+          );
+          return NextResponse.json(
+            { error: 'Asset file corrupt' },
+            { status: 500 }
+          );
+        }
+      }
+
       const contentType = asset.content_type || 'application/octet-stream';
       const filename = asset.name || path.basename(asset.file_path);
 
-      return new NextResponse(buffer, {
+      return new NextResponse(new Uint8Array(body), {
         status: 200,
         headers: {
           'Content-Type': contentType,
-          'Content-Length': String(buffer.length),
+          'Content-Length': String(body.length),
           'Content-Disposition': contentDisposition(filename, 'attachment'),
           'Cache-Control': 'private, max-age=3600',
           'X-Content-Type-Options': 'nosniff',

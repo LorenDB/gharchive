@@ -14,6 +14,11 @@ import {
   hostInfoFromCloneUrl,
   resolveForgejoHost,
 } from '@/lib/forgejo';
+import {
+  compressForStorage,
+  shouldCompressAsset,
+  storageCompressedPath,
+} from '@/lib/asset-compression';
 
 function getReleasesDir(): string {
   const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
@@ -267,6 +272,25 @@ export type DownloadAssetOptions = {
    * allowlist — used to queue a user approval prompt.
    */
   onUntrustedHost?: (hostname: string, url: string) => void;
+  /**
+   * When true, gzip assets that are not already compressed archives.
+   * Only applied when compression shrinks the payload.
+   */
+  compress?: boolean;
+  /**
+   * Original asset filename used for archive-extension detection.
+   * Defaults to the basename of destPath.
+   */
+  assetName?: string;
+};
+
+/** Result of a successful or failed release-asset download. */
+export type DownloadAssetResult = {
+  ok: boolean;
+  /** Actual on-disk path written (may include `.storage.gz` suffix). */
+  filePath?: string;
+  /** True when bytes on disk are gzipped for storage. */
+  storageCompressed?: boolean;
 };
 
 function notifyUntrustedHost(
@@ -286,19 +310,19 @@ export async function downloadReleaseAsset(
   url: string,
   destPath: string,
   options: DownloadAssetOptions = {}
-): Promise<boolean> {
+): Promise<DownloadAssetResult> {
   try {
     const trusted = parseTrustedAssetUrl(url, options.extraTrustedHosts);
     if (!trusted) {
       console.warn(`[releases] refusing untrusted asset URL: ${url.slice(0, 120)}`);
       notifyUntrustedHost(url, options.onUntrustedHost);
-      return false;
+      return { ok: false };
     }
 
     const memCheck = hasEnoughMemory(64);
     if (!memCheck.ok) {
       console.warn(`[releases] skipping asset download (${memCheck.reason}): ${url}`);
-      return false;
+      return { ok: false };
     }
 
     const dir = path.dirname(destPath);
@@ -324,7 +348,7 @@ export async function downloadReleaseAsset(
       });
       if (res.status >= 300 && res.status < 400) {
         const loc = res.headers.get('location');
-        if (!loc) return false;
+        if (!loc) return { ok: false };
         const absolute = new URL(loc, current).toString();
         const next = parseTrustedAssetUrl(absolute, options.extraTrustedHosts);
         if (!next) {
@@ -332,20 +356,34 @@ export async function downloadReleaseAsset(
             `[releases] asset redirect to untrusted host blocked: ${loc.slice(0, 120)}`
           );
           notifyUntrustedHost(absolute, options.onUntrustedHost);
-          return false;
+          return { ok: false };
         }
         current = next;
         continue;
       }
       break;
     }
-    if (!res || !res.ok) return false;
+    if (!res || !res.ok) return { ok: false };
 
-    const buffer = Buffer.from(await res.arrayBuffer());
-    fs.writeFileSync(destPath, buffer);
-    return true;
+    const raw = Buffer.from(await res.arrayBuffer());
+    let outPath = destPath;
+    let storageCompressed = false;
+    let toWrite: Buffer = raw;
+
+    const assetName = options.assetName || path.basename(destPath);
+    if (shouldCompressAsset(assetName, Boolean(options.compress))) {
+      const gz = compressForStorage(raw);
+      if (gz) {
+        toWrite = gz;
+        outPath = storageCompressedPath(destPath);
+        storageCompressed = true;
+      }
+    }
+
+    fs.writeFileSync(outPath, toWrite);
+    return { ok: true, filePath: outPath, storageCompressed };
   } catch {
-    return false;
+    return { ok: false };
   }
 }
 

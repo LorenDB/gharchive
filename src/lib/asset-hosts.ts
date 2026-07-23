@@ -27,6 +27,7 @@ import {
   downloadReleaseAsset,
   getReleaseAssetPath,
 } from '@/lib/releases';
+import { resolveExistingAssetFile } from '@/lib/asset-compression';
 import { hostInfoFromCloneUrl } from '@/lib/forgejo';
 import { tryGetUserId, AUTOLOGIN_USER_ID } from '@/lib/user-context';
 
@@ -347,17 +348,26 @@ export async function downloadMissingAssetsFromHost(
       { isPrivate: Boolean(archive.is_private), userId }
     );
 
-    if (fs.existsSync(dest)) {
-      updateReleaseAsset(asset.id, { file_path: dest });
+    const existingFile = resolveExistingAssetFile(dest);
+    if (existingFile) {
+      updateReleaseAsset(asset.id, {
+        file_path: existingFile.path,
+        storage_compressed: existingFile.storageCompressed,
+      });
       downloaded++;
       continue;
     }
 
-    const ok = await downloadReleaseAsset(asset.download_url, dest, {
+    const result = await downloadReleaseAsset(asset.download_url, dest, {
       extraTrustedHosts: extra,
+      compress: settings.compress_release_assets,
+      assetName: asset.name,
     });
-    if (ok) {
-      updateReleaseAsset(asset.id, { file_path: dest });
+    if (result.ok) {
+      updateReleaseAsset(asset.id, {
+        file_path: result.filePath || dest,
+        storage_compressed: Boolean(result.storageCompressed),
+      });
       downloaded++;
     }
   }

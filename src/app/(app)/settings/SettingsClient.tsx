@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { formatBytes, formatDate, formatDiskSize } from '@/lib/format';
 
@@ -40,6 +40,7 @@ interface Settings {
   storage_alert_threshold_percent: number;
   storage_alert_min_free_mb: number;
   global_max_asset_size_mb: number;
+  compress_release_assets: boolean;
   approved_asset_hosts: string[];
   rejected_asset_hosts: string[];
   wayback_readme_urls_enabled: boolean;
@@ -77,6 +78,21 @@ interface DiskInfo {
   usedMB: number;
   usageRatio: number;
   available: boolean;
+}
+
+interface CompressMigrateJob {
+  running: boolean;
+  target_compress: boolean | null;
+  total: number;
+  processed: number;
+  converted: number;
+  skipped: number;
+  failed: number;
+  current: string | null;
+  errors: { asset: string; error: string }[];
+  started_at: string | null;
+  finished_at: string | null;
+  message: string | null;
 }
 
 interface UserUsageSummary {
@@ -264,6 +280,100 @@ export default function SettingsClient({
     }
   );
   const [tab, setTab] = useState<SettingsTab>('settings');
+  const [migrateJob, setMigrateJob] = useState<CompressMigrateJob | null>(null);
+  const [migrateBusy, setMigrateBusy] = useState(false);
+
+  // Poll compression migration status while running (admin tab)
+  useEffect(() => {
+    if (!isAdmin) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    async function poll() {
+      try {
+        const res = await fetch('/api/settings/compress-migrate');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+        const job = data.job as CompressMigrateJob | undefined;
+        if (job) setMigrateJob(job);
+        if (job?.running) {
+          timer = setTimeout(poll, 1500);
+        }
+      } catch {
+        // ignore transient poll errors
+      }
+    }
+
+    // Initial fetch when admin loads / when tab might show status
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [isAdmin, migrateJob?.running]);
+
+  async function startCompressMigrate() {
+    if (!draft) return;
+    const target = Boolean(draft.compress_release_assets);
+    const action = target ? 'compress' : 'decompress';
+    if (
+      !confirm(
+        target
+          ? 'Migrate all stored release assets to match compression ON? Eligible files will be gzipped on disk. Already-compressed archives are skipped. This runs in the background.'
+          : 'Migrate all stored release assets to match compression OFF? Storage-gzipped files will be expanded back to raw. This runs in the background.'
+      )
+    ) {
+      return;
+    }
+    setMigrateBusy(true);
+    setMessage(null);
+    try {
+      const res = await fetch('/api/settings/compress-migrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ compress_release_assets: target }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to start migration');
+      setMigrateJob(data.job);
+      // Keep draft/settings in sync with persisted target
+      if (data.job?.target_compress != null) {
+        const next = {
+          ...draft,
+          compress_release_assets: Boolean(data.job.target_compress),
+        };
+        setDraft(next);
+        setSettings((prev) => (prev ? { ...prev, compress_release_assets: next.compress_release_assets } : prev));
+      }
+      setMessage({
+        type: 'ok',
+        text: `Asset ${action} migration started`,
+      });
+    } catch (err: any) {
+      setMessage({ type: 'err', text: err.message });
+    } finally {
+      setMigrateBusy(false);
+    }
+  }
+
+  async function cancelCompressMigrate() {
+    setMigrateBusy(true);
+    try {
+      const res = await fetch('/api/settings/compress-migrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cancel: true }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to cancel');
+      setMigrateJob(data.job);
+    } catch (err: any) {
+      setMessage({ type: 'err', text: err.message });
+    } finally {
+      setMigrateBusy(false);
+    }
+  }
 
   async function linkGithub(e: React.FormEvent) {
     e.preventDefault();
@@ -1761,6 +1871,112 @@ export default function SettingsClient({
                     Upper bound for all users&rsquo; per-user asset size limits.{' '}
                     <span className="font-mono">0</span> = no global limit.
                   </p>
+                </div>
+
+                <div className="flex items-start justify-between gap-4 pt-1">
+                  <div>
+                    <p className="text-sm font-medium text-white">
+                      Compress release assets in storage
+                    </p>
+                    <p className="hint !mt-1">
+                      Gzip assets on disk to save space. Already-compressed
+                      archives (.zip, .tar.gz, .7z, …) are left as-is. Downloads
+                      always receive the original bytes. New downloads follow this
+                      toggle; use Migrate all to rewrite existing files.
+                    </p>
+                  </div>
+                  <Toggle
+                    checked={draft.compress_release_assets}
+                    onChange={(v) =>
+                      setDraft({ ...draft, compress_release_assets: v })
+                    }
+                    label="Compress release assets in storage"
+                  />
+                </div>
+
+                <div className="rounded-lg border border-ink-800/80 bg-ink-950/40 px-4 py-3 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-medium text-white">
+                        Migrate existing assets
+                      </p>
+                      <p className="hint !mt-1">
+                        Background job that rewrites every on-disk release asset
+                        to match the compression toggle above
+                        {draft.compress_release_assets
+                          ? ' (gzip eligible files)'
+                          : ' (expand storage-gzipped files)'}.
+                        Starting migration also saves the toggle.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {migrateJob?.running && (
+                        <button
+                          type="button"
+                          className="btn-ghost text-sm"
+                          disabled={migrateBusy}
+                          onClick={cancelCompressMigrate}
+                        >
+                          Cancel
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="btn-secondary text-sm"
+                        disabled={migrateBusy || Boolean(migrateJob?.running)}
+                        onClick={startCompressMigrate}
+                      >
+                        {migrateJob?.running || migrateBusy ? (
+                          <>
+                            <Spinner />{' '}
+                            {migrateJob?.running ? 'Migrating…' : 'Starting…'}
+                          </>
+                        ) : (
+                          'Migrate all'
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {migrateJob &&
+                    (migrateJob.running ||
+                      migrateJob.finished_at ||
+                      migrateJob.message) && (
+                      <div className="text-xs text-ink-400 space-y-1.5 border-t border-ink-800/60 pt-3">
+                        {migrateJob.message && (
+                          <p className="text-ink-300">{migrateJob.message}</p>
+                        )}
+                        {migrateJob.total > 0 && (
+                          <p className="font-mono">
+                            {migrateJob.processed}/{migrateJob.total} processed
+                            {' · '}
+                            {migrateJob.converted} converted
+                            {' · '}
+                            {migrateJob.skipped} skipped
+                            {migrateJob.failed > 0 && (
+                              <span className="text-rose-400">
+                                {' · '}
+                                {migrateJob.failed} failed
+                              </span>
+                            )}
+                          </p>
+                        )}
+                        {migrateJob.running && migrateJob.current && (
+                          <p className="truncate text-ink-500">
+                            Current: {migrateJob.current}
+                          </p>
+                        )}
+                        {migrateJob.errors?.length > 0 && !migrateJob.running && (
+                          <ul className="mt-1 space-y-0.5 text-rose-400/90 max-h-24 overflow-y-auto">
+                            {migrateJob.errors.slice(0, 8).map((e, i) => (
+                              <li key={i} className="truncate">
+                                {e.asset}: {e.error}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
                 </div>
               </div>
             </section>

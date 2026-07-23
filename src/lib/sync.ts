@@ -24,6 +24,7 @@ import {
   downloadReleaseAsset,
   getReleaseAssetPath,
 } from '@/lib/releases';
+import { resolveExistingAssetFile } from '@/lib/asset-compression';
 import { checkRemoteRepoExists } from '@/lib/remote-exists';
 import { knownApiKind } from '@/lib/platform';
 import { fetchRemoteRepoMeta } from '@/lib/remote-meta';
@@ -356,6 +357,8 @@ export async function syncRepo(
           );
 
           let downloaded = false;
+          let storedPath: string | null = null;
+          let storageCompressed = false;
           const tooLarge = asset.size > 0 && asset.size > maxBytes;
           let skipReason:
             | 'settings'
@@ -408,15 +411,20 @@ export async function syncRepo(
             }
 
             if (!skipReason) {
-              // Shared path from another user's sync
-              if (fs.existsSync(assetPath)) {
+              // Shared path from another user's sync (raw or storage-compressed)
+              const existingFile = resolveExistingAssetFile(assetPath);
+              if (existingFile) {
                 downloaded = true;
+                storedPath = existingFile.path;
+                storageCompressed = existingFile.storageCompressed;
               } else {
-                downloaded = await downloadReleaseAsset(
+                const result = await downloadReleaseAsset(
                   asset.download_url,
                   assetPath,
                   {
                     extraTrustedHosts: assetExtraHosts,
+                    compress: settings.compress_release_assets,
+                    assetName: asset.name,
                     onUntrustedHost: (hostname, sampleUrl) => {
                       requestAssetHostApproval({
                         hostname,
@@ -428,6 +436,11 @@ export async function syncRepo(
                     },
                   }
                 );
+                if (result.ok) {
+                  downloaded = true;
+                  storedPath = result.filePath || assetPath;
+                  storageCompressed = Boolean(result.storageCompressed);
+                }
               }
             }
           }
@@ -435,9 +448,10 @@ export async function syncRepo(
           if (existing) {
             if (downloaded) {
               updateReleaseAsset(existing.id, {
-                file_path: assetPath,
+                file_path: storedPath || assetPath,
                 size: asset.size || existing.size,
                 download_url: asset.download_url || existing.download_url,
+                storage_compressed: storageCompressed,
               });
               newAssets++;
             }
@@ -447,8 +461,9 @@ export async function syncRepo(
               name: asset.name,
               content_type: asset.content_type,
               size: asset.size || null,
-              file_path: downloaded ? assetPath : null,
+              file_path: downloaded ? storedPath || assetPath : null,
               download_url: asset.download_url || null,
+              storage_compressed: downloaded ? storageCompressed : false,
             });
             if (downloaded) newAssets++;
           }

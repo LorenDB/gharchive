@@ -129,6 +129,13 @@ export interface Settings {
   global_max_asset_size_mb: number;
 
   /**
+   * Admin-only: gzip release assets on disk when they are not already a
+   * known compressed archive (.zip, .tar.gz, .7z, …). Default on.
+   * Clients always receive the original bytes (transparent gunzip on serve).
+   */
+  compress_release_assets: boolean;
+
+  /**
    * Hostnames the user has approved for release-asset downloads
    * (Forgejo CDN / alternate download domains beyond the repo host).
    */
@@ -192,6 +199,8 @@ export const DEFAULT_SETTINGS: Settings = {
   storage_alert_min_free_mb: 1024,
 
   global_max_asset_size_mb: 0,
+
+  compress_release_assets: true,
 
   approved_asset_hosts: [],
   rejected_asset_hosts: [],
@@ -362,6 +371,11 @@ interface ReleaseAsset {
   size: number | null;
   file_path: string | null;
   download_url: string | null;
+  /**
+   * When true, `file_path` holds gzip-compressed bytes (storage only).
+   * Serve path gunzips before returning to the client.
+   */
+  storage_compressed?: boolean;
   created_at: string;
 }
 
@@ -2424,7 +2438,10 @@ export function findReleaseAsset(
 export function updateReleaseAsset(
   id: number,
   updates: Partial<
-    Pick<ReleaseAsset, 'file_path' | 'size' | 'content_type' | 'download_url'>
+    Pick<
+      ReleaseAsset,
+      'file_path' | 'size' | 'content_type' | 'download_url' | 'storage_compressed'
+    >
   >
 ): void {
   load();
@@ -2588,6 +2605,7 @@ export function pruneReleaseAssets(
       // best-effort file cleanup
     }
     asset.file_path = null;
+    asset.storage_compressed = false;
     dropped++;
     dirty = true;
   }
