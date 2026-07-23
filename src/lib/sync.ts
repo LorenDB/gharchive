@@ -28,6 +28,11 @@ import {
   requestAssetHostApproval,
 } from '@/lib/asset-hosts';
 import { findReleaseAsset, updateReleaseAsset } from '@/lib/db';
+import {
+  archiveReadmeUrlsFromMirror,
+  hasWaybackCredentials,
+  waybackCredentialsFromSettings,
+} from '@/lib/wayback';
 
 export interface RepoLike {
   id: number;
@@ -482,6 +487,24 @@ export async function syncRepo(
         subject: `archive:${archiveId}:releases`,
         severity: 'warning',
       });
+    }
+  }
+
+  // Optional: push absolute README URLs to the Wayback Machine (SPN2).
+  // Best-effort — never fails the overall sync.
+  if (settings.wayback_readme_urls_enabled) {
+    if (!hasWaybackCredentials(settings)) {
+      messages.push(
+        'wayback: enabled but missing archive.org S3 API keys (set under Settings)'
+      );
+    } else {
+      const creds = waybackCredentialsFromSettings(settings)!;
+      options.onProgress?.('Submitting README URLs to Wayback Machine...');
+      const { message: waybackMsg } = await archiveReadmeUrlsFromMirror(
+        repo.mirror_path,
+        creds
+      );
+      messages.push(waybackMsg);
     }
   }
 

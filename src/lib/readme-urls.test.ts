@@ -5,6 +5,8 @@ import {
   readmeDirFromPath,
   mirrorAssetUrl,
   rewriteReadmeAssetUrl,
+  normalizeAbsoluteHttpUrl,
+  extractAbsoluteUrls,
 } from '@/lib/readme-urls';
 
 describe('isAbsoluteOrSpecialUrl', () => {
@@ -164,3 +166,89 @@ describe('rewriteReadmeAssetUrl', () => {
     expect(rewriteReadmeAssetUrl('../../secret', opts)).toBe('../../secret');
   });
 });
+
+describe('normalizeAbsoluteHttpUrl', () => {
+  it('accepts http/https URLs', () => {
+    expect(normalizeAbsoluteHttpUrl('https://example.com/path')).toBe(
+      'https://example.com/path'
+    );
+    expect(normalizeAbsoluteHttpUrl('http://example.com/')).toBe(
+      'http://example.com/'
+    );
+  });
+
+  it('strips hash and trailing punctuation', () => {
+    expect(normalizeAbsoluteHttpUrl('https://example.com/a#section')).toBe(
+      'https://example.com/a'
+    );
+    expect(normalizeAbsoluteHttpUrl('https://example.com/a.')).toBe(
+      'https://example.com/a'
+    );
+    expect(normalizeAbsoluteHttpUrl('https://example.com/a,')).toBe(
+      'https://example.com/a'
+    );
+  });
+
+  it('rejects non-http schemes and relative paths', () => {
+    expect(normalizeAbsoluteHttpUrl('mailto:a@b.com')).toBeNull();
+    expect(normalizeAbsoluteHttpUrl('docs/readme.md')).toBeNull();
+    expect(normalizeAbsoluteHttpUrl('/docs/api')).toBeNull();
+    expect(normalizeAbsoluteHttpUrl('')).toBeNull();
+  });
+
+  it('rejects localhost and credentials-in-url', () => {
+    expect(normalizeAbsoluteHttpUrl('http://localhost/foo')).toBeNull();
+    expect(normalizeAbsoluteHttpUrl('https://127.0.0.1/x')).toBeNull();
+    expect(
+      normalizeAbsoluteHttpUrl('https://user:pass@example.com/secret')
+    ).toBeNull();
+  });
+
+  it('upgrades protocol-relative URLs', () => {
+    expect(normalizeAbsoluteHttpUrl('//cdn.example.com/x.js')).toBe(
+      'https://cdn.example.com/x.js'
+    );
+  });
+});
+
+describe('extractAbsoluteUrls', () => {
+  it('extracts markdown links and images', () => {
+    const md = `
+# Title
+See [docs](https://example.com/docs) and [local](./local.md).
+![logo](https://cdn.example.com/logo.png)
+[angle](<https://angled.example.com/a>)
+`;
+    const urls = extractAbsoluteUrls(md);
+    expect(urls).toContain('https://example.com/docs');
+    expect(urls).toContain('https://cdn.example.com/logo.png');
+    expect(urls).toContain('https://angled.example.com/a');
+    expect(urls.some((u) => u.includes('local.md'))).toBe(false);
+  });
+
+  it('extracts HTML href/src and bare URLs', () => {
+    const html = `
+<a href="https://a.example.com">A</a>
+<img src='https://b.example.com/i.png' />
+Visit https://c.example.com/page for more.
+`;
+    const urls = extractAbsoluteUrls(html);
+    expect(urls).toContain('https://a.example.com/');
+    expect(urls).toContain('https://b.example.com/i.png');
+    expect(urls).toContain('https://c.example.com/page');
+  });
+
+  it('dedupes and ignores empty content', () => {
+    expect(extractAbsoluteUrls('')).toEqual([]);
+    const urls = extractAbsoluteUrls(
+      '[a](https://example.com) https://example.com'
+    );
+    expect(urls).toEqual(['https://example.com/']);
+  });
+
+  it('skips data/mailto and relative', () => {
+    const md = `[x](mailto:a@b.com) ![y](data:image/png;base64,xx) [z](./rel.png)`;
+    expect(extractAbsoluteUrls(md)).toEqual([]);
+  });
+});
+

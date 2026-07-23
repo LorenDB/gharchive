@@ -1,5 +1,6 @@
 /**
  * Resolve relative asset URLs inside a README against the archived mirror.
+ * Also extracts absolute http(s) URLs for optional Wayback Machine archival.
  */
 
 /** True for absolute / special schemes that should not be rewritten. */
@@ -11,6 +12,104 @@ export function isAbsoluteOrSpecialUrl(href: string): boolean {
   if (t.startsWith('//')) return true;
   if (t.startsWith('#')) return true;
   return false;
+}
+
+/**
+ * Normalize a candidate URL for Wayback submission.
+ * Returns null if not a plain absolute http(s) URL worth archiving.
+ */
+export function normalizeAbsoluteHttpUrl(raw: string): string | null {
+  if (!raw || typeof raw !== 'string') return null;
+  let s = raw.trim();
+  if (!s) return null;
+
+  // Strip common trailing punctuation from bare-URL extraction
+  s = s.replace(/[),.;:!?'"\]]+$/g, '');
+  // Angle-bracket autolinks
+  if (s.startsWith('<') && s.endsWith('>')) {
+    s = s.slice(1, -1).trim();
+  }
+
+  // Protocol-relative → https
+  if (s.startsWith('//')) {
+    s = 'https:' + s;
+  }
+
+  if (!/^https?:\/\//i.test(s)) return null;
+
+  let u: URL;
+  try {
+    u = new URL(s);
+  } catch {
+    return null;
+  }
+
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+  // Skip credentials-in-URL and empty host
+  if (u.username || u.password) return null;
+  if (!u.hostname) return null;
+  // Skip localhost / private-looking hosts (not useful on Wayback)
+  const host = u.hostname.toLowerCase();
+  if (
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '0.0.0.0' ||
+    host === '::1' ||
+    host.endsWith('.local') ||
+    host.endsWith('.localhost')
+  ) {
+    return null;
+  }
+  // Cap length (SPN2 / practical)
+  if (u.href.length > 2000) return null;
+
+  // Prefer https href string without hash (fragment not fetched by crawlers)
+  u.hash = '';
+  return u.href;
+}
+
+/**
+ * Extract unique absolute http(s) URLs from README markdown / plain / HTML.
+ * Covers markdown links/images, angle autolinks, HTML href/src, and bare URLs.
+ */
+export function extractAbsoluteUrls(content: string): string[] {
+  if (!content || typeof content !== 'string') return [];
+
+  const found = new Set<string>();
+
+  const add = (raw: string) => {
+    const n = normalizeAbsoluteHttpUrl(raw);
+    if (n) found.add(n);
+  };
+
+  // Markdown images/links: ![alt](url) or [text](url) — optional angle brackets
+  // Also title: [text](url "title")
+  const mdLinkRe =
+    /!\[[^\]]*]\(\s*<?([^>\s)]+)>?(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)|\[[^\]]*]\(\s*<?([^>\s)]+)>?(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)/g;
+  let m: RegExpExecArray | null;
+  while ((m = mdLinkRe.exec(content)) !== null) {
+    add(m[1] || m[2] || '');
+  }
+
+  // Angle-bracket autolinks: <https://example.com>
+  const angleRe = /<(https?:\/\/[^>\s]+)>/gi;
+  while ((m = angleRe.exec(content)) !== null) {
+    add(m[1]);
+  }
+
+  // HTML href / src attributes (double or single quotes)
+  const attrRe = /\b(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+  while ((m = attrRe.exec(content)) !== null) {
+    add(m[1] || m[2] || '');
+  }
+
+  // Bare http(s) URLs not already captured (conservative character class)
+  const bareRe = /https?:\/\/[^\s<>"'`)\]]+/gi;
+  while ((m = bareRe.exec(content)) !== null) {
+    add(m[0]);
+  }
+
+  return [...found];
 }
 
 /**

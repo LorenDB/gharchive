@@ -112,6 +112,21 @@ export interface Settings {
   approved_asset_hosts: string[];
   /** Hostnames the user has rejected — never download assets from these. */
   rejected_asset_hosts: string[];
+
+  // ── Wayback Machine (README absolute URLs) ────────────────────
+  /**
+   * When enabled, absolute http(s) URLs found in each repo's README are
+   * submitted to the Internet Archive Save Page Now (SPN2) API during sync.
+   * Off by default. Requires archive.org S3 API keys below.
+   */
+  wayback_readme_urls_enabled: boolean;
+  /**
+   * Internet Archive S3 access key (from https://archive.org/account/s3.php).
+   * Sent as `Authorization: LOW access:secret` to web.archive.org/save.
+   */
+  wayback_access_key: string;
+  /** Internet Archive S3 secret key (paired with wayback_access_key). */
+  wayback_secret_key: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -155,6 +170,10 @@ export const DEFAULT_SETTINGS: Settings = {
 
   approved_asset_hosts: [],
   rejected_asset_hosts: [],
+
+  wayback_readme_urls_enabled: false,
+  wayback_access_key: '',
+  wayback_secret_key: '',
 };
 
 /** Pending user prompt for an untrusted release-asset download host. */

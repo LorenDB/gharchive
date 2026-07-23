@@ -348,6 +348,64 @@ export async function PUT(req: NextRequest) {
         patch.storage_alert_min_free_mb = Math.round(n);
       }
 
+      // Wayback Machine — README absolute URL archival (per-user)
+      if (typeof body.wayback_readme_urls_enabled === 'boolean') {
+        patch.wayback_readme_urls_enabled = body.wayback_readme_urls_enabled;
+      }
+
+      if (body.wayback_access_key !== undefined) {
+        if (typeof body.wayback_access_key !== 'string') {
+          return NextResponse.json(
+            { error: 'wayback_access_key must be a string' },
+            { status: 400 }
+          );
+        }
+        const k = body.wayback_access_key.trim();
+        if (k.length > 256) {
+          return NextResponse.json(
+            { error: 'wayback_access_key too long' },
+            { status: 400 }
+          );
+        }
+        // Allow alphanumeric + common S3 key chars
+        if (k && !/^[A-Za-z0-9_-]+$/.test(k)) {
+          return NextResponse.json(
+            {
+              error:
+                'wayback_access_key must be alphanumeric (plus _ -)',
+            },
+            { status: 400 }
+          );
+        }
+        patch.wayback_access_key = k;
+      }
+
+      if (body.wayback_secret_key !== undefined) {
+        if (typeof body.wayback_secret_key !== 'string') {
+          return NextResponse.json(
+            { error: 'wayback_secret_key must be a string' },
+            { status: 400 }
+          );
+        }
+        const k = body.wayback_secret_key.trim();
+        if (k.length > 256) {
+          return NextResponse.json(
+            { error: 'wayback_secret_key too long' },
+            { status: 400 }
+          );
+        }
+        if (k && !/^[A-Za-z0-9_-]+$/.test(k)) {
+          return NextResponse.json(
+            {
+              error:
+                'wayback_secret_key must be alphanumeric (plus _ -)',
+            },
+            { status: 400 }
+          );
+        }
+        patch.wayback_secret_key = k;
+      }
+
       const settings = updateSettings(patch);
       return NextResponse.json({
         settings,

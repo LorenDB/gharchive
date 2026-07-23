@@ -40,6 +40,9 @@ interface Settings {
   global_max_asset_size_mb: number;
   approved_asset_hosts: string[];
   rejected_asset_hosts: string[];
+  wayback_readme_urls_enabled: boolean;
+  wayback_access_key: string;
+  wayback_secret_key: string;
 }
 
 interface SchedulerStatus {
@@ -1109,6 +1112,102 @@ export default function SettingsClient({
                     </div>
                   )}
                 </div>
+              </div>
+            </section>
+
+            {/* Wayback Machine — README URLs */}
+            <section className="surface p-5 sm:p-6">
+              <div className="flex items-start justify-between gap-4 mb-5">
+                <div>
+                  <h2 className="text-base font-semibold text-white">
+                    Wayback Machine
+                  </h2>
+                  <p className="hint !mt-1">
+                    During each repo sync, extract absolute{' '}
+                    <span className="font-mono">http(s)</span> URLs from the
+                    README and submit them to the Internet Archive{' '}
+                    <a
+                      href="https://web.archive.org/save"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-amber-400 hover:text-amber-300 underline underline-offset-2"
+                    >
+                      Save Page Now
+                    </a>{' '}
+                    API for public web archival. Off by default. Requires free{' '}
+                    <a
+                      href="https://archive.org/account/s3.php"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-amber-400 hover:text-amber-300 underline underline-offset-2"
+                    >
+                      archive.org S3 API keys
+                    </a>
+                    .
+                  </p>
+                </div>
+                <Toggle
+                  checked={draft.wayback_readme_urls_enabled}
+                  onChange={(v) =>
+                    setDraft({ ...draft, wayback_readme_urls_enabled: v })
+                  }
+                  label="Archive README URLs"
+                />
+              </div>
+
+              <div
+                className={`space-y-4 transition-opacity ${
+                  draft.wayback_readme_urls_enabled
+                    ? 'opacity-100'
+                    : 'opacity-40 pointer-events-none'
+                }`}
+              >
+                <div>
+                  <label className="label" htmlFor="wayback-access-key">
+                    Access key
+                  </label>
+                  <input
+                    id="wayback-access-key"
+                    type="password"
+                    className="input font-mono text-[13px]"
+                    value={draft.wayback_access_key || ''}
+                    onChange={(e) =>
+                      setDraft({ ...draft, wayback_access_key: e.target.value })
+                    }
+                    placeholder="S3 access key"
+                    autoComplete="off"
+                  />
+                </div>
+                <div>
+                  <label className="label" htmlFor="wayback-secret-key">
+                    Secret key
+                  </label>
+                  <input
+                    id="wayback-secret-key"
+                    type="password"
+                    className="input font-mono text-[13px]"
+                    value={draft.wayback_secret_key || ''}
+                    onChange={(e) =>
+                      setDraft({ ...draft, wayback_secret_key: e.target.value })
+                    }
+                    placeholder="S3 secret key"
+                    autoComplete="off"
+                  />
+                </div>
+                <p className="hint !mt-0">
+                  Keys are stored only in local{' '}
+                  <span className="font-mono">data/db.json</span> (per user).
+                  URLs already captured within the last 30 days are skipped.
+                  At most 50 URLs are submitted per repo per sync. Captures are
+                  public on the Wayback Machine.
+                </p>
+                {draft.wayback_readme_urls_enabled &&
+                  !(draft.wayback_access_key || '').trim() && (
+                    <p className="text-xs text-amber-400/90">
+                      Enable is on, but access key is empty — set both keys and
+                      save, or archiving will be skipped at sync time.
+                    </p>
+                  )}
               </div>
             </section>
 
