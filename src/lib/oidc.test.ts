@@ -1,9 +1,18 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import {
   claimsToUsername,
+  decodeJwtPayload,
   mergeOidcClaims,
   type OidcClaims,
 } from '@/lib/oidc';
+
+function fakeJwt(payload: Record<string, unknown>): string {
+  const header = Buffer.from(
+    JSON.stringify({ alg: 'none', typ: 'JWT' })
+  ).toString('base64url');
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  return `${header}.${body}.sig`;
+}
 
 describe('mergeOidcClaims', () => {
   afterEach(() => {
@@ -104,6 +113,78 @@ describe('mergeOidcClaims', () => {
     expect(merged?.sub).toBe('token-sub');
     expect(merged?.name).toBe('B');
     expect(err).toHaveBeenCalled();
+  });
+});
+
+describe('decodeJwtPayload', () => {
+  const base = {
+    sub: 'user-1',
+    iss: 'https://idp.example.com',
+    aud: 'client-1',
+    nonce: 'n-abc',
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  };
+
+  it('accepts a valid payload with expected checks', () => {
+    const claims = decodeJwtPayload(fakeJwt(base), {
+      expectedIssuer: base.iss,
+      expectedClientId: 'client-1',
+      expectedNonce: 'n-abc',
+    });
+    expect(claims?.sub).toBe('user-1');
+  });
+
+  it('rejects missing aud when client id expected', () => {
+    const { aud: _a, ...noAud } = base;
+    expect(
+      decodeJwtPayload(fakeJwt(noAud), {
+        expectedIssuer: base.iss,
+        expectedClientId: 'client-1',
+        expectedNonce: 'n-abc',
+      })
+    ).toBeNull();
+  });
+
+  it('rejects wrong aud', () => {
+    expect(
+      decodeJwtPayload(fakeJwt({ ...base, aud: 'other' }), {
+        expectedClientId: 'client-1',
+      })
+    ).toBeNull();
+  });
+
+  it('rejects expired tokens', () => {
+    expect(
+      decodeJwtPayload(
+        fakeJwt({ ...base, exp: Math.floor(Date.now() / 1000) - 120 }),
+        {
+          expectedIssuer: base.iss,
+          expectedClientId: 'client-1',
+          expectedNonce: 'n-abc',
+        }
+      )
+    ).toBeNull();
+  });
+
+  it('rejects missing exp when validating OIDC', () => {
+    const { exp: _e, ...noExp } = base;
+    expect(
+      decodeJwtPayload(fakeJwt(noExp), {
+        expectedIssuer: base.iss,
+        expectedClientId: 'client-1',
+        expectedNonce: 'n-abc',
+      })
+    ).toBeNull();
+  });
+
+  it('rejects iss mismatch', () => {
+    expect(
+      decodeJwtPayload(fakeJwt(base), {
+        expectedIssuer: 'https://evil.example.com',
+        expectedClientId: 'client-1',
+        expectedNonce: 'n-abc',
+      })
+    ).toBeNull();
   });
 });
 

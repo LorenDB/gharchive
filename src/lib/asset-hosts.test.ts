@@ -18,6 +18,13 @@ describe('normalizeAssetHostname', () => {
     expect(normalizeAssetHostname('a/b')).toBeNull();
     expect(normalizeAssetHostname('has space.com')).toBeNull();
   });
+
+  it('rejects loopback and cloud-metadata hosts', () => {
+    expect(normalizeAssetHostname('localhost')).toBeNull();
+    expect(normalizeAssetHostname('127.0.0.1')).toBeNull();
+    expect(normalizeAssetHostname('169.254.169.254')).toBeNull();
+    expect(normalizeAssetHostname('metadata.google.internal')).toBeNull();
+  });
 });
 
 describe('hostnameFromAssetUrl', () => {

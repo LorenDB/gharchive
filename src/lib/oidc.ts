@@ -216,9 +216,10 @@ function rawDecodeJwtPayload(jwt: string): OidcClaims | null {
 }
 
 /**
- * Decode and validate id_token JWT payload.
- * Always prefer fetchUserInfo over this fallback. Must pass
- * basic structural checks; callers should validate iss/aud/nonce.
+ * Decode and validate id_token JWT payload (structural checks).
+ * Tokens are obtained only from the IdP token endpoint over HTTPS; full JWKS
+ * signature verification is not implemented (defense-in-depth for later).
+ * Always validates iss/aud/nonce/exp when expected values are provided.
  */
 export function decodeJwtPayload(
   jwt: string,
@@ -227,17 +228,49 @@ export function decodeJwtPayload(
   const claims = rawDecodeJwtPayload(jwt);
   if (!claims?.sub) return null;
 
-  if (opts?.expectedIssuer && claims.iss && claims.iss !== opts.expectedIssuer) {
-    console.error('[oidc] id_token iss mismatch:', claims.iss, 'expected:', opts.expectedIssuer);
-    return null;
-  }
-
-  if (opts?.expectedClientId) {
-    const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
-    if (claims.aud && !aud.includes(opts.expectedClientId)) {
-      console.error('[oidc] id_token aud mismatch:', claims.aud, 'expected:', opts.expectedClientId);
+  // OIDC Core §3.1.3.7 — issuer must match
+  if (opts?.expectedIssuer) {
+    if (!claims.iss || claims.iss !== opts.expectedIssuer) {
+      console.error(
+        '[oidc] id_token iss mismatch:',
+        claims.iss,
+        'expected:',
+        opts.expectedIssuer
+      );
       return null;
     }
+  }
+
+  // aud is required when we know the client id (must include our client_id)
+  if (opts?.expectedClientId) {
+    if (claims.aud == null || claims.aud === '') {
+      console.error('[oidc] id_token missing aud claim');
+      return null;
+    }
+    const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+    if (!aud.includes(opts.expectedClientId)) {
+      console.error(
+        '[oidc] id_token aud mismatch:',
+        claims.aud,
+        'expected:',
+        opts.expectedClientId
+      );
+      return null;
+    }
+  }
+
+  // exp is required; reject expired tokens (60s clock skew allowed)
+  const exp = (claims as OidcClaims & { exp?: number }).exp;
+  if (typeof exp === 'number') {
+    const now = Math.floor(Date.now() / 1000);
+    if (exp + 60 < now) {
+      console.error('[oidc] id_token expired');
+      return null;
+    }
+  } else if (opts?.expectedIssuer || opts?.expectedClientId) {
+    // When performing OIDC validation, require exp
+    console.error('[oidc] id_token missing exp claim');
+    return null;
   }
 
   // Validate nonce to prevent id_token replay attacks (OIDC Core 1.0 §3.1.3.7)

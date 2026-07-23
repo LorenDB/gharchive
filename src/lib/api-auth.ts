@@ -25,11 +25,18 @@ interface RateLimitBucket {
 const rateLimitBuckets = new Map<string, RateLimitBucket>();
 
 function clientIp(req: NextRequest): string {
-  // Prefer right-most / last proxy hop only when a trusted proxy sets these.
-  // Take the first XFF entry (client as seen by the edge proxy).
-  const xff = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
-  if (xff) return xff;
-  return req.headers.get('x-real-ip')?.trim() || 'unknown';
+  // X-Forwarded-For / X-Real-IP are only trusted when TRUST_PROXY is set
+  // (deployment behind a reverse proxy that strips client-supplied values).
+  // Without that, attackers can rotate spoofed XFF values to bypass rate limits.
+  const trustProxy =
+    process.env.TRUST_PROXY === 'true' || process.env.TRUST_PROXY === '1';
+  if (trustProxy) {
+    const xff = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
+    if (xff) return xff;
+    const realIp = req.headers.get('x-real-ip')?.trim();
+    if (realIp) return realIp;
+  }
+  return 'unknown';
 }
 
 function rateLimitKey(req: NextRequest): string {

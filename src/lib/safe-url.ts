@@ -1,6 +1,6 @@
 /**
  * Shared URL safety helpers: trusted download hosts, path confinement,
- * Content-Disposition sanitization.
+ * Content-Disposition sanitization, outbound-host SSRF guards.
  */
 
 import path from 'path';
@@ -31,12 +31,79 @@ function normalizeHost(hostname: string): string {
   return normalizeHostname(hostname);
 }
 
+/**
+ * Hosts that must never be used for server-side outbound requests
+ * (clone metadata probes, asset downloads, host approval).
+ *
+ * Blocks loopback, link-local / cloud-metadata, and well-known metadata names.
+ * RFC1918 private ranges are allowed so self-hosted LAN forges still work when
+ * the user explicitly adds them as a clone URL (extraHosts).
+ */
+export function isUnsafeOutboundHostname(hostname: string): boolean {
+  if (!hostname || typeof hostname !== 'string') return true;
+  let host = normalizeHostname(hostname);
+  // Strip IPv6 brackets if present
+  if (host.startsWith('[') && host.endsWith(']')) {
+    host = host.slice(1, -1);
+  }
+
+  if (
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host.endsWith('.local') ||
+    host === 'metadata' ||
+    host === 'metadata.google.internal' ||
+    host === 'metadata.goog' ||
+    host === 'kubernetes.default' ||
+    host === 'kubernetes.default.svc' ||
+    host === 'kubernetes.default.svc.cluster.local'
+  ) {
+    return true;
+  }
+
+  // IPv6 loopback / link-local / IPv4-mapped
+  if (host === '::1' || host === '0:0:0:0:0:0:0:1') return true;
+  // Link-local fe80::/10
+  if (/^fe[89ab][0-9a-f]*:/i.test(host)) return true;
+  // IPv4-mapped IPv6 (::ffff:a.b.c.d)
+  const v4Mapped = host.match(/^(?:0:)*:?ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i);
+  if (v4Mapped) {
+    return isUnsafeIpv4(v4Mapped[1]!);
+  }
+
+  // Dotted IPv4
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) {
+    return isUnsafeIpv4(host);
+  }
+
+  return false;
+}
+
+function isUnsafeIpv4(ip: string): boolean {
+  const parts = ip.split('.').map((p) => Number(p));
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
+    return true;
+  }
+  const [a, b] = parts as [number, number, number, number];
+  // 0.0.0.0/8
+  if (a === 0) return true;
+  // 127.0.0.0/8 loopback
+  if (a === 127) return true;
+  // 169.254.0.0/16 link-local + cloud metadata
+  if (a === 169 && b === 254) return true;
+  // 255.255.255.255 broadcast
+  if (a === 255 && b === 255 && parts[2] === 255 && parts[3] === 255) return true;
+  return false;
+}
+
 /** True when hostname is an exact trusted host or a githubusercontent subdomain. */
 export function isTrustedAssetHost(
   hostname: string,
   extraHosts?: Iterable<string>
 ): boolean {
   const host = normalizeHost(hostname);
+  // Never trust loopback / metadata even if listed in extraHosts
+  if (isUnsafeOutboundHostname(host)) return false;
   if (TRUSTED_ASSET_HOSTS.has(host)) return true;
   // GitHub release CDN uses rotating subdomains
   if (host.endsWith('.githubusercontent.com')) return true;
@@ -68,10 +135,50 @@ export function parseTrustedAssetUrl(
   if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
   // Prefer HTTPS in production; allow http only for localhost-style (never for assets)
   if (u.protocol === 'http:') return null;
+  if (isUnsafeOutboundHostname(u.hostname)) return null;
   if (!isTrustedAssetHost(u.hostname, extraHosts)) return null;
   // Block credentials in URL
   if (u.username || u.password) return null;
   return u;
+}
+
+/**
+ * Hosts that may receive a forge/platform auth token during asset download.
+ * Never send tokens to user-approved or arbitrary extra hosts (credential theft).
+ */
+export function assetAuthForHostname(hostname: string): {
+  header: string;
+  value: string;
+} | null {
+  const host = normalizeHostname(hostname);
+  if (isUnsafeOutboundHostname(host)) return null;
+
+  if (
+    host === 'github.com' ||
+    host === 'api.github.com' ||
+    host.endsWith('.githubusercontent.com')
+  ) {
+    const token = process.env.GITHUB_TOKEN?.trim();
+    if (token) return { header: 'Authorization', value: `Bearer ${token}` };
+    return null;
+  }
+
+  if (host === 'gitlab.com' || host.endsWith('.gitlab.com')) {
+    const token = process.env.GITLAB_TOKEN?.trim();
+    if (token) return { header: 'PRIVATE-TOKEN', value: token };
+    return null;
+  }
+
+  if (host === 'codeberg.org') {
+    const token =
+      process.env.CODEBERG_TOKEN?.trim() ||
+      process.env.FORGEJO_TOKEN?.trim() ||
+      process.env.GITEA_TOKEN?.trim();
+    if (token) return { header: 'Authorization', value: `token ${token}` };
+    return null;
+  }
+
+  return null;
 }
 
 /**

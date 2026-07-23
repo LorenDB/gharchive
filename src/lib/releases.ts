@@ -7,7 +7,11 @@ import {
 } from '@/lib/user-context';
 import { hasEnoughMemory } from '@/lib/memory';
 import { assertSafePathSegment } from '@/lib/git';
-import { parseTrustedAssetUrl } from '@/lib/safe-url';
+import {
+  assetAuthForHostname,
+  isUnsafeOutboundHostname,
+  parseTrustedAssetUrl,
+} from '@/lib/safe-url';
 import { knownApiKind, platformFromHost } from '@/lib/platform';
 import {
   fetchForgejoReleases,
@@ -109,6 +113,10 @@ export function parseCloneUrl(url: string): CloneIdentity {
   if (sshMatch) {
     const rawHost = sshMatch[1];
     const hostname = rawHost.toLowerCase().replace(/^www\./, '');
+    // Block loopback / cloud-metadata hosts (SSRF via clone + API probes)
+    if (isUnsafeOutboundHostname(hostname)) {
+      throw new Error('Invalid repository URL: host not allowed');
+    }
     const repoPath = sshMatch[2];
     const platform = platformFromHost(hostname);
     const kind = knownApiKind(platform);
@@ -135,6 +143,9 @@ export function parseCloneUrl(url: string): CloneIdentity {
     // IPv6 or empty host
     if (!hostname || hostname.startsWith('[')) {
       throw new Error('Invalid repository URL');
+    }
+    if (isUnsafeOutboundHostname(hostname)) {
+      throw new Error('Invalid repository URL: host not allowed');
     }
     const repoPath = httpsMatch[2];
     const platform = platformFromHost(hostname);
@@ -328,19 +339,16 @@ export async function downloadReleaseAsset(
     const dir = path.dirname(destPath);
     fs.mkdirSync(dir, { recursive: true });
 
-    const token =
-      process.env.GITHUB_TOKEN ||
-      process.env.GITLAB_TOKEN ||
-      process.env.FORGEJO_TOKEN ||
-      process.env.CODEBERG_TOKEN ||
-      process.env.GITEA_TOKEN;
-    const headers: Record<string, string> = { 'User-Agent': 'gharchive' };
-    if (token) headers['Authorization'] = `Bearer ${token}`;
-
     // Manual redirect follow so we re-validate host on every hop (SSRF).
+    // Auth tokens are attached only for known platform hosts — never for
+    // user-approved or arbitrary extra hosts (prevents credential theft).
     let current = trusted;
     let res: Response | null = null;
     for (let hop = 0; hop < 5; hop++) {
+      const headers: Record<string, string> = { 'User-Agent': 'gharchive' };
+      const auth = assetAuthForHostname(current.hostname);
+      if (auth) headers[auth.header] = auth.value;
+
       res = await fetch(current.toString(), {
         headers,
         redirect: 'manual',

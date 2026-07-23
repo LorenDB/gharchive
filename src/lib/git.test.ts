@@ -72,7 +72,7 @@ describe('contentTypeForPath', () => {
     expect(contentTypeForPath('photo.jpeg')).toBe('image/jpeg');
     expect(contentTypeForPath('photo.gif')).toBe('image/gif');
     expect(contentTypeForPath('photo.webp')).toBe('image/webp');
-    expect(contentTypeForPath('icon.svg')).toBe('image/svg+xml');
+    expect(contentTypeForPath('icon.svg')).toBe('application/octet-stream');
     expect(contentTypeForPath('icon.ico')).toBe('image/x-icon');
     expect(contentTypeForPath('photo.bmp')).toBe('image/bmp');
   });
@@ -106,7 +106,7 @@ describe('contentTypeForPath', () => {
     expect(contentTypeForPath('page.html')).toBe('application/octet-stream');
     expect(contentTypeForPath('page.htm')).toBe('application/octet-stream');
     // SVG keeps image type for <img> embedding but shouldForceAttachment
-    expect(contentTypeForPath('icon.svg')).toBe('image/svg+xml');
+    expect(contentTypeForPath('icon.svg')).toBe('application/octet-stream');
   });
 
   it('returns application types', () => {

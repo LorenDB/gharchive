@@ -7,6 +7,7 @@
 
 import { knownApiKind } from '@/lib/platform';
 import { forgejoApiBase, hostInfoFromCloneUrl } from '@/lib/forgejo';
+import { isUnsafeOutboundHostname } from '@/lib/safe-url';
 
 export interface RemoteExistsResult {
   /** true = definitely exists, false = definitely gone, null = unknown */
@@ -129,6 +130,13 @@ async function checkForgejoRepoExists(
   port?: string | null
 ): Promise<RemoteExistsResult> {
   try {
+    if (isUnsafeOutboundHostname(hostname)) {
+      return {
+        exists: null,
+        statusCode: null,
+        message: 'host not allowed',
+      };
+    }
     const base = forgejoApiBase(hostname, port);
     const url = `${base}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
 
@@ -136,15 +144,21 @@ async function checkForgejoRepoExists(
       Accept: 'application/json',
       'User-Agent': 'gharchive',
     };
-    const token =
-      process.env.FORGEJO_TOKEN ||
-      process.env.CODEBERG_TOKEN ||
-      process.env.GITEA_TOKEN;
-    if (token) headers['Authorization'] = `token ${token}`;
+    // Only attach forge tokens for Codeberg (or known public hosts) — never
+    // for arbitrary self-hosted hostnames from clone URLs.
+    const host = hostname.toLowerCase().replace(/^www\./, '');
+    if (host === 'codeberg.org') {
+      const token =
+        process.env.CODEBERG_TOKEN ||
+        process.env.FORGEJO_TOKEN ||
+        process.env.GITEA_TOKEN;
+      if (token) headers['Authorization'] = `token ${token}`;
+    }
 
     const res = await fetch(url, {
       headers,
       signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
+      redirect: 'manual',
     });
 
     if (res.status === 404) {

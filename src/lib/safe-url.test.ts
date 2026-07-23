@@ -8,7 +8,69 @@ import {
   isPathInside,
   safeContentDispositionFilename,
   contentDisposition,
+  isUnsafeOutboundHostname,
+  assetAuthForHostname,
 } from '@/lib/safe-url';
+
+describe('isUnsafeOutboundHostname', () => {
+  it('blocks loopback and localhost names', () => {
+    expect(isUnsafeOutboundHostname('localhost')).toBe(true);
+    expect(isUnsafeOutboundHostname('127.0.0.1')).toBe(true);
+    expect(isUnsafeOutboundHostname('127.1.2.3')).toBe(true);
+    expect(isUnsafeOutboundHostname('::1')).toBe(true);
+    expect(isUnsafeOutboundHostname('foo.localhost')).toBe(true);
+  });
+
+  it('blocks cloud metadata / link-local', () => {
+    expect(isUnsafeOutboundHostname('169.254.169.254')).toBe(true);
+    expect(isUnsafeOutboundHostname('169.254.0.1')).toBe(true);
+    expect(isUnsafeOutboundHostname('metadata.google.internal')).toBe(true);
+    expect(isUnsafeOutboundHostname('metadata')).toBe(true);
+  });
+
+  it('allows public and RFC1918 private hosts (self-hosted forges)', () => {
+    expect(isUnsafeOutboundHostname('github.com')).toBe(false);
+    expect(isUnsafeOutboundHostname('git.example.com')).toBe(false);
+    expect(isUnsafeOutboundHostname('10.0.0.5')).toBe(false);
+    expect(isUnsafeOutboundHostname('192.168.1.10')).toBe(false);
+  });
+});
+
+describe('assetAuthForHostname', () => {
+  const prev = {
+    GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+    GITLAB_TOKEN: process.env.GITLAB_TOKEN,
+    FORGEJO_TOKEN: process.env.FORGEJO_TOKEN,
+    CODEBERG_TOKEN: process.env.CODEBERG_TOKEN,
+  };
+
+  afterEach(() => {
+    for (const [k, v] of Object.entries(prev)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  it('returns github token only for github hosts', () => {
+    process.env.GITHUB_TOKEN = 'ghp_test';
+    process.env.FORGEJO_TOKEN = 'forge_secret';
+    expect(assetAuthForHostname('github.com')?.value).toBe('Bearer ghp_test');
+    expect(assetAuthForHostname('objects.githubusercontent.com')?.value).toBe(
+      'Bearer ghp_test'
+    );
+    // Must never leak platform tokens to arbitrary/extra hosts
+    expect(assetAuthForHostname('evil.com')).toBeNull();
+    expect(assetAuthForHostname('git.example.com')).toBeNull();
+    expect(assetAuthForHostname('169.254.169.254')).toBeNull();
+  });
+
+  it('returns codeberg token only for codeberg.org', () => {
+    process.env.CODEBERG_TOKEN = 'cb_tok';
+    process.env.FORGEJO_TOKEN = 'forge_secret';
+    expect(assetAuthForHostname('codeberg.org')?.value).toBe('token cb_tok');
+    expect(assetAuthForHostname('forge.example.com')).toBeNull();
+  });
+});
 
 describe('isTrustedAssetHost', () => {
   it('accepts GitHub, GitLab, and Codeberg hosts', () => {
@@ -33,11 +95,15 @@ describe('isTrustedAssetHost', () => {
     expect(isTrustedAssetHost('git.example.com')).toBe(false);
   });
 
-  it('rejects arbitrary hosts', () => {
+  it('rejects arbitrary hosts and never trusts metadata even as extra', () => {
     expect(isTrustedAssetHost('evil.com')).toBe(false);
     expect(isTrustedAssetHost('169.254.169.254')).toBe(false);
     expect(isTrustedAssetHost('localhost')).toBe(false);
     expect(isTrustedAssetHost('github.com.evil.com')).toBe(false);
+    expect(
+      isTrustedAssetHost('169.254.169.254', ['169.254.169.254'])
+    ).toBe(false);
+    expect(isTrustedAssetHost('127.0.0.1', ['127.0.0.1'])).toBe(false);
   });
 });
 
@@ -58,6 +124,14 @@ describe('parseTrustedAssetUrl', () => {
   it('rejects untrusted hosts', () => {
     expect(parseTrustedAssetUrl('https://evil.com/payload')).toBeNull();
     expect(parseTrustedAssetUrl('https://169.254.169.254/latest')).toBeNull();
+    expect(
+      parseTrustedAssetUrl('https://169.254.169.254/latest', [
+        '169.254.169.254',
+      ])
+    ).toBeNull();
+    expect(
+      parseTrustedAssetUrl('https://127.0.0.1/x', ['127.0.0.1'])
+    ).toBeNull();
   });
 
   it('accepts Codeberg release URLs', () => {

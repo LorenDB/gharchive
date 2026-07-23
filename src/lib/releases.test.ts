@@ -144,6 +144,16 @@ describe('parseCloneUrl', () => {
 
   describe('error cases', () => {
     it('throws for invalid URL format', () => {
+      expect(() =>
+        parseCloneUrl('https://127.0.0.1/owner/repo.git')
+      ).toThrow(/host not allowed|Invalid/);
+      expect(() =>
+        parseCloneUrl('https://169.254.169.254/latest/meta-data')
+      ).toThrow(/host not allowed|Invalid/);
+      expect(() =>
+        parseCloneUrl('git@localhost:owner/repo.git')
+      ).toThrow(/host not allowed|Invalid/);
+
       expect(() => parseCloneUrl('not-a-url')).toThrow(
         'Unsupported repository URL'
       );

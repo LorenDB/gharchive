@@ -22,7 +22,11 @@ import {
   shouldCacheReleaseAtIndex,
   type PendingAssetHostApproval,
 } from '@/lib/db';
-import { isTrustedAssetHost, parseTrustedAssetUrl } from '@/lib/safe-url';
+import {
+  isTrustedAssetHost,
+  isUnsafeOutboundHostname,
+  parseTrustedAssetUrl,
+} from '@/lib/safe-url';
 import {
   downloadReleaseAsset,
   getReleaseAssetPath,
@@ -45,6 +49,8 @@ export function normalizeAssetHostname(raw: string): string | null {
   // Hostname labels (no scheme, path, or userinfo)
   if (!/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/i.test(host)) return null;
   if (host.includes('..')) return null;
+  // Never let users approve loopback / cloud-metadata targets (SSRF)
+  if (isUnsafeOutboundHostname(host)) return null;
   return host;
 }
 

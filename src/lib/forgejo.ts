@@ -7,6 +7,7 @@
 
 import type { RemoteRepoMeta } from '@/lib/remote-meta';
 import type { ReleaseData } from '@/lib/releases';
+import { isUnsafeOutboundHostname } from '@/lib/safe-url';
 
 const DETECT_TIMEOUT_MS = 4_000;
 const API_TIMEOUT_MS = 30_000;
@@ -101,14 +102,54 @@ export async function detectForgejoHost(
     return false;
   }
 
+  // Never probe loopback / cloud-metadata (SSRF)
+  if (isUnsafeOutboundHostname(hostname)) {
+    forgejoHostCache.set(key, false);
+    return false;
+  }
+
   try {
     const url = `${forgejoApiBase(hostname, port)}/version`;
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'gharchive', Accept: 'application/json' },
-      signal: AbortSignal.timeout(DETECT_TIMEOUT_MS),
-      redirect: 'follow',
-    });
-    if (!res.ok) {
+    // Manual redirects: only follow same-host hops so a public host cannot
+    // bounce the probe onto an internal/metadata address.
+    let current = url;
+    let res: Response | null = null;
+    for (let hop = 0; hop < 3; hop++) {
+      res = await fetch(current, {
+        headers: { 'User-Agent': 'gharchive', Accept: 'application/json' },
+        signal: AbortSignal.timeout(DETECT_TIMEOUT_MS),
+        redirect: 'manual',
+      });
+      if (res.status >= 300 && res.status < 400) {
+        const loc = res.headers.get('location');
+        if (!loc) {
+          forgejoHostCache.set(key, false);
+          return false;
+        }
+        let next: URL;
+        try {
+          next = new URL(loc, current);
+        } catch {
+          forgejoHostCache.set(key, false);
+          return false;
+        }
+        if (next.protocol !== 'https:') {
+          forgejoHostCache.set(key, false);
+          return false;
+        }
+        if (
+          isUnsafeOutboundHostname(next.hostname) ||
+          normalizeHostname(next.hostname) !== normalizeHostname(hostname)
+        ) {
+          forgejoHostCache.set(key, false);
+          return false;
+        }
+        current = next.toString();
+        continue;
+      }
+      break;
+    }
+    if (!res || !res.ok) {
       forgejoHostCache.set(key, false);
       return false;
     }
@@ -126,18 +167,22 @@ export async function detectForgejoHost(
   }
 }
 
-function forgejoHeaders(): Record<string, string> {
+function forgejoHeaders(hostname?: string): Record<string, string> {
   const headers: Record<string, string> = {
     Accept: 'application/json',
     'User-Agent': 'gharchive',
   };
-  const token =
-    process.env.FORGEJO_TOKEN ||
-    process.env.CODEBERG_TOKEN ||
-    process.env.GITEA_TOKEN;
-  if (token) {
-    // Forgejo/Gitea accept token as query or Authorization: token …
-    headers['Authorization'] = `token ${token}`;
+  // Only attach env tokens for known public hosts. Sending FORGEJO_TOKEN to
+  // arbitrary self-hosted hostnames from user clone URLs would leak secrets.
+  const host = hostname ? normalizeHostname(hostname) : '';
+  if (host === 'codeberg.org') {
+    const token =
+      process.env.CODEBERG_TOKEN ||
+      process.env.FORGEJO_TOKEN ||
+      process.env.GITEA_TOKEN;
+    if (token) {
+      headers['Authorization'] = `token ${token}`;
+    }
   }
   return headers;
 }
@@ -148,11 +193,15 @@ export async function fetchForgejoRepoMeta(
   name: string,
   port?: string | null
 ): Promise<RemoteRepoMeta> {
+  if (isUnsafeOutboundHostname(hostname)) {
+    throw new Error('Forgejo host not allowed');
+  }
   const base = forgejoApiBase(hostname, port);
   const url = `${base}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
   const res = await fetch(url, {
-    headers: forgejoHeaders(),
+    headers: forgejoHeaders(hostname),
     signal: AbortSignal.timeout(API_TIMEOUT_MS),
+    redirect: 'manual',
   });
   if (!res.ok) {
     throw new Error(`Forgejo API error: ${res.status}`);
@@ -196,6 +245,9 @@ export async function fetchForgejoReleases(
   name: string,
   port?: string | null
 ): Promise<ReleaseData[]> {
+  if (isUnsafeOutboundHostname(hostname)) {
+    throw new Error('Forgejo host not allowed');
+  }
   const base = forgejoApiBase(hostname, port);
   // Forgejo paginates; request a large page. limit max is typically 50.
   const all: ReleaseData[] = [];
@@ -205,8 +257,9 @@ export async function fetchForgejoReleases(
   while (page <= 20) {
     const url = `${base}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/releases?limit=${limit}&page=${page}`;
     const res = await fetch(url, {
-      headers: forgejoHeaders(),
+      headers: forgejoHeaders(hostname),
       signal: AbortSignal.timeout(API_TIMEOUT_MS),
+      redirect: 'manual',
     });
     if (!res.ok) {
       throw new Error(`Forgejo API error: ${res.status}`);

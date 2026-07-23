@@ -787,9 +787,9 @@ const FORCE_DOWNLOAD_EXTS = new Set([
 /** Guess Content-Type from a repo file path. */
 export function contentTypeForPath(filePath: string): string {
   const ext = filePath.split('.').pop()?.toLowerCase() || '';
-  // Active / scriptable types: never serve as browsable HTML/JS under app origin
+  // Active / scriptable types: never serve as browsable HTML/JS/SVG under app origin
+  // (SVG with image/svg+xml can still execute script in some browsers even as attachment)
   if (FORCE_DOWNLOAD_EXTS.has(ext)) {
-    if (ext === 'svg') return 'image/svg+xml';
     return 'application/octet-stream';
   }
   const map: Record<string, string> = {
