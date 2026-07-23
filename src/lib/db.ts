@@ -16,10 +16,33 @@ function getDbPath(): string {
   return path.join(getDataDir(), 'db.json');
 }
 
+/** How release assets are cached locally. */
+export type ReleaseAssetMode = 'all' | 'none' | 'last_n';
+
+/** Resolved policy used during sync / prune. */
+export type ReleaseAssetPolicy = {
+  mode: ReleaseAssetMode;
+  /** Used when mode is `last_n`. Always >= 1 when mode is last_n. */
+  keep_last: number;
+};
+
 export interface Settings {
   auto_sync_enabled: boolean;
   sync_interval_hours: number;
+  /**
+   * Legacy boolean (kept in sync with release_asset_mode).
+   * Prefer release_asset_mode. false ≡ 'none'; true ≡ 'all' | 'last_n'.
+   */
   download_release_assets: boolean;
+  /**
+   * Which release assets to download and retain:
+   * - all: every release
+   * - none: metadata only
+   * - last_n: only the newest `release_asset_keep_last` releases
+   */
+  release_asset_mode: ReleaseAssetMode;
+  /** Keep assets for this many newest releases when mode is last_n. */
+  release_asset_keep_last: number;
   max_asset_size_mb: number;
   concurrent_syncs: number;
   /** Scan linked account stars on a schedule */
@@ -133,6 +156,8 @@ export const DEFAULT_SETTINGS: Settings = {
   auto_sync_enabled: true,
   sync_interval_hours: 24,
   download_release_assets: true,
+  release_asset_mode: 'all',
+  release_asset_keep_last: 5,
   max_asset_size_mb: 500,
   concurrent_syncs: 1,
   auto_scan_stars_enabled: false,
@@ -268,6 +293,16 @@ interface RepoMembership {
   from_star?: boolean;
   from_owned?: boolean;
   local_description?: string | null;
+  /**
+   * Per-repo override for release asset caching.
+   * null/undefined = inherit from user settings.
+   */
+  release_asset_mode?: ReleaseAssetMode | null;
+  /**
+   * Per-repo keep-last count when mode is last_n (or override sets last_n).
+   * null/undefined = inherit from user settings.
+   */
+  release_asset_keep_last?: number | null;
 }
 
 /**
@@ -289,6 +324,10 @@ export interface Repo {
   from_star?: boolean;
   from_owned?: boolean;
   local_description?: string | null;
+  /** null = inherit global settings */
+  release_asset_mode?: ReleaseAssetMode | null;
+  /** null = inherit global settings */
+  release_asset_keep_last?: number | null;
   remote_description?: string | null;
   topics?: string[];
   language?: string | null;
@@ -383,7 +422,116 @@ export const LIST_COLORS = [
   '#f472b6', // pink
 ];
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
+
+const RELEASE_ASSET_MODES: readonly ReleaseAssetMode[] = [
+  'all',
+  'none',
+  'last_n',
+] as const;
+
+export function isReleaseAssetMode(v: unknown): v is ReleaseAssetMode {
+  return typeof v === 'string' && (RELEASE_ASSET_MODES as readonly string[]).includes(v);
+}
+
+/**
+ * Normalize settings: migrate legacy download_release_assets → mode,
+ * keep the boolean in sync, clamp keep_last.
+ */
+export function normalizeSettings(partial: Partial<Settings> | Settings): Settings {
+  const p = partial as Partial<Settings>;
+  const raw = { ...DEFAULT_SETTINGS, ...p };
+
+  // Prefer explicit mode on the input; else migrate legacy boolean (before
+  // DEFAULT_SETTINGS fills release_asset_mode with 'all').
+  let mode: ReleaseAssetMode;
+  if (isReleaseAssetMode(p.release_asset_mode)) {
+    mode = p.release_asset_mode;
+  } else if (typeof p.download_release_assets === 'boolean') {
+    mode = p.download_release_assets ? 'all' : 'none';
+  } else if (isReleaseAssetMode(raw.release_asset_mode)) {
+    mode = raw.release_asset_mode;
+  } else {
+    mode = 'all';
+  }
+
+  let keepLast = Number(
+    p.release_asset_keep_last ?? raw.release_asset_keep_last
+  );
+  if (!Number.isFinite(keepLast) || keepLast < 1) {
+    keepLast = DEFAULT_SETTINGS.release_asset_keep_last;
+  }
+  keepLast = Math.min(Math.round(keepLast), 10_000);
+
+  return {
+    ...raw,
+    release_asset_mode: mode,
+    release_asset_keep_last: keepLast,
+    download_release_assets: mode !== 'none',
+  };
+}
+
+/**
+ * Resolve effective release-asset policy for a membership (override or settings).
+ */
+export function resolveReleaseAssetPolicy(
+  settings: Settings,
+  membership?: {
+    release_asset_mode?: ReleaseAssetMode | null;
+    release_asset_keep_last?: number | null;
+  } | null
+): ReleaseAssetPolicy {
+  const s = normalizeSettings(settings);
+  const mode =
+    membership?.release_asset_mode != null &&
+    isReleaseAssetMode(membership.release_asset_mode)
+      ? membership.release_asset_mode
+      : s.release_asset_mode;
+
+  let keepLast = s.release_asset_keep_last;
+  if (
+    membership?.release_asset_keep_last != null &&
+    Number.isFinite(membership.release_asset_keep_last) &&
+    membership.release_asset_keep_last >= 1
+  ) {
+    keepLast = Math.min(Math.round(membership.release_asset_keep_last), 10_000);
+  }
+
+  return { mode, keep_last: keepLast };
+}
+
+/**
+ * Merge policies from multiple members of a shared archive.
+ * Most permissive wins: any `all` → all; else max keep_last among last_n; else none.
+ */
+export function mergeReleaseAssetPolicies(
+  policies: ReleaseAssetPolicy[]
+): ReleaseAssetPolicy {
+  if (policies.length === 0) {
+    return { mode: 'all', keep_last: DEFAULT_SETTINGS.release_asset_keep_last };
+  }
+  if (policies.some((p) => p.mode === 'all')) {
+    return { mode: 'all', keep_last: 0 };
+  }
+  const lastN = policies.filter((p) => p.mode === 'last_n');
+  if (lastN.length === 0) {
+    return { mode: 'none', keep_last: 0 };
+  }
+  return {
+    mode: 'last_n',
+    keep_last: Math.max(...lastN.map((p) => p.keep_last)),
+  };
+}
+
+/** Whether assets for a release at index (0 = newest) should be cached. */
+export function shouldCacheReleaseAtIndex(
+  policy: ReleaseAssetPolicy,
+  indexFromNewest: number
+): boolean {
+  if (policy.mode === 'none') return false;
+  if (policy.mode === 'all') return true;
+  return indexFromNewest < policy.keep_last;
+}
 
 let data: Data | null = null;
 let nextIds: Record<string, number> = {};
@@ -417,6 +565,8 @@ function hydrateRepo(m: RepoMembership, archive: Archive | undefined): Repo {
       from_star: m.from_star,
       from_owned: m.from_owned,
       local_description: m.local_description ?? null,
+      release_asset_mode: m.release_asset_mode ?? null,
+      release_asset_keep_last: m.release_asset_keep_last ?? null,
     };
   }
   return {
@@ -433,6 +583,8 @@ function hydrateRepo(m: RepoMembership, archive: Archive | undefined): Repo {
     from_star: m.from_star,
     from_owned: m.from_owned,
     local_description: m.local_description ?? null,
+    release_asset_mode: m.release_asset_mode ?? null,
+    release_asset_keep_last: m.release_asset_keep_last ?? null,
     remote_description: archive.remote_description ?? null,
     topics: archive.topics ?? [],
     language: archive.language ?? null,
@@ -835,6 +987,21 @@ function migrate(raw: Record<string, unknown>): Data {
   // even though clone_url points at gitlab.com (and vice versa).
   if ((d.schema_version || 0) < 4) {
     repairArchivePlatformFromCloneUrl(d);
+  }
+
+  // v4 → v5: release asset mode (all / none / last_n) + per-membership overrides
+  if ((d.schema_version || 0) < 5) {
+    for (const userId of Object.keys(d.settings_by_user || {})) {
+      d.settings_by_user[userId] = normalizeSettings(
+        d.settings_by_user[userId] || {}
+      );
+    }
+    for (const m of d.repos as RepoMembership[]) {
+      if (m.release_asset_mode === undefined) m.release_asset_mode = null;
+      if (m.release_asset_keep_last === undefined) {
+        m.release_asset_keep_last = null;
+      }
+    }
   }
 
   d.schema_version = SCHEMA_VERSION;
@@ -1511,7 +1678,7 @@ export function getDb() {
 export function getSettings(): Settings {
   const userId = tryGetUserId() ?? AUTOLOGIN_USER_ID;
   const stored = load().settings_by_user[userId];
-  const settings = { ...DEFAULT_SETTINGS, ...(stored || {}) };
+  const settings = normalizeSettings(stored || {});
   if (!settings.apprise_api_url && process.env.APPRISE_API_URL) {
     settings.apprise_api_url = process.env.APPRISE_API_URL;
   }
@@ -1521,13 +1688,36 @@ export function getSettings(): Settings {
 export function updateSettings(partial: Partial<Settings>): Settings {
   load();
   const userId = uid();
-  data!.settings_by_user[userId] = {
-    ...DEFAULT_SETTINGS,
+  // Sync legacy boolean with mode when either is patched
+  const patch = { ...partial };
+  if (patch.release_asset_mode !== undefined && isReleaseAssetMode(patch.release_asset_mode)) {
+    patch.download_release_assets = patch.release_asset_mode !== 'none';
+  } else if (typeof patch.download_release_assets === 'boolean') {
+    // Legacy clients toggling the boolean only
+    if (patch.download_release_assets === false) {
+      patch.release_asset_mode = 'none';
+    } else if (
+      !patch.release_asset_mode &&
+      (data!.settings_by_user[userId]?.release_asset_mode === 'none' ||
+        data!.settings_by_user[userId]?.download_release_assets === false)
+    ) {
+      patch.release_asset_mode = 'all';
+    }
+  }
+  // Do not pre-spread DEFAULT_SETTINGS here — normalizeSettings merges them
+  // after reading explicit keys so legacy download_release_assets still migrates.
+  data!.settings_by_user[userId] = normalizeSettings({
     ...data!.settings_by_user[userId],
-    ...partial,
-  };
+    ...patch,
+  });
   save();
   return getSettings();
+}
+
+/** Settings for an arbitrary user id (used when merging shared-archive policies). */
+export function getSettingsForUser(userId: string): Settings {
+  const stored = load().settings_by_user[userId];
+  return normalizeSettings(stored || {});
 }
 
 // ── GitHub account ──────────────────────────────────────────────
@@ -1831,7 +2021,14 @@ export function getRepoById(id: number): Repo | undefined {
 
 /** Membership fields only. */
 export type RepoMembershipUpdatableFields = Partial<
-  Pick<RepoMembership, 'from_star' | 'from_owned' | 'local_description'>
+  Pick<
+    RepoMembership,
+    | 'from_star'
+    | 'from_owned'
+    | 'local_description'
+    | 'release_asset_mode'
+    | 'release_asset_keep_last'
+  >
 >;
 
 /** Fields that live on the archive (shared). */
@@ -1856,6 +2053,8 @@ export function updateRepo(id: number, updates: RepoUpdatableFields) {
     'from_star',
     'from_owned',
     'local_description',
+    'release_asset_mode',
+    'release_asset_keep_last',
   ];
   const membershipUpdates: RepoMembershipUpdatableFields = {};
   const archiveUpdates: ArchiveUpdatableFields = {};
@@ -2309,4 +2508,89 @@ export function tagExists(archiveId: number, tagName: string): boolean {
 /** Count releases for an archive (unscoped). */
 export function countArchiveReleases(archiveId: number): number {
   return load().releases.filter((r) => r.archive_id === archiveId).length;
+}
+
+/** Releases for an archive, newest first (published_at, then created_at, then id). */
+export function getArchiveReleasesSorted(archiveId: number): Release[] {
+  load();
+  return data!.releases
+    .filter((r) => r.archive_id === archiveId)
+    .slice()
+    .sort(compareReleasesNewestFirst);
+}
+
+export function compareReleasesNewestFirst(
+  a: { published_at?: string | null; created_at?: string; id?: number },
+  b: { published_at?: string | null; created_at?: string; id?: number }
+): number {
+  const ap = a.published_at || a.created_at || '';
+  const bp = b.published_at || b.created_at || '';
+  if (ap && bp && ap !== bp) return bp.localeCompare(ap);
+  if (ap && !bp) return -1;
+  if (!ap && bp) return 1;
+  return (b.id ?? 0) - (a.id ?? 0);
+}
+
+/**
+ * Most-permissive release-asset policy across all memberships of an archive.
+ * Used when pruning shared public asset trees so we never drop files another
+ * member still wants.
+ */
+export function getArchiveReleaseAssetPolicy(
+  archiveId: number
+): ReleaseAssetPolicy {
+  load();
+  const members = data!.repos.filter((r) => r.archive_id === archiveId);
+  if (members.length === 0) {
+    return resolveReleaseAssetPolicy(getSettings());
+  }
+  const policies = members.map((m) =>
+    resolveReleaseAssetPolicy(getSettingsForUser(m.owner_id), m)
+  );
+  return mergeReleaseAssetPolicies(policies);
+}
+
+/**
+ * Drop on-disk release assets that fall outside the keep policy.
+ * Metadata rows remain; only `file_path` is cleared and files unlinked.
+ * @returns number of asset files dropped
+ */
+export function pruneReleaseAssets(
+  archiveId: number,
+  policy?: ReleaseAssetPolicy
+): number {
+  load();
+  const effective = policy ?? getArchiveReleaseAssetPolicy(archiveId);
+  if (effective.mode === 'all') return 0;
+
+  const releases = getArchiveReleasesSorted(archiveId);
+  const keepIds = new Set<number>();
+  if (effective.mode === 'last_n') {
+    for (let i = 0; i < Math.min(effective.keep_last, releases.length); i++) {
+      keepIds.add(releases[i]!.id);
+    }
+  }
+  // mode === 'none' → keepIds empty
+
+  let dropped = 0;
+  let dirty = false;
+  for (const asset of data!.release_assets) {
+    const release = data!.releases.find((r) => r.id === asset.release_id);
+    if (!release || release.archive_id !== archiveId) continue;
+    if (keepIds.has(release.id)) continue;
+    if (!asset.file_path) continue;
+
+    try {
+      if (fs.existsSync(asset.file_path)) {
+        fs.unlinkSync(asset.file_path);
+      }
+    } catch {
+      // best-effort file cleanup
+    }
+    asset.file_path = null;
+    dropped++;
+    dirty = true;
+  }
+  if (dirty) save();
+  return dropped;
 }

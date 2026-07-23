@@ -6,6 +6,7 @@ import RepoTree from '@/components/RepoTree';
 import ReleasesViewer from '@/components/ReleasesViewer';
 import ReadmePanel from '@/components/ReadmePanel';
 import LocalDescriptionEditor from '@/components/LocalDescriptionEditor';
+import ReleaseAssetPolicyEditor from '@/components/ReleaseAssetPolicyEditor';
 import { formatBytes, formatDate, formatRelativeTime } from '@/lib/format';
 import {
   isGithub,
@@ -15,6 +16,7 @@ import {
 import { languageColor } from '@/lib/language-colors';
 
 type Tab = 'overview' | 'code' | 'releases' | 'activity';
+type ReleaseAssetMode = 'all' | 'none' | 'last_n';
 
 export default function RepoDetail() {
   const { id } = useParams<{ id: string }>();
@@ -28,11 +30,15 @@ export default function RepoDetail() {
   const [tab, setTab] = useState<Tab>('overview');
   const [syncError, setSyncError] = useState('');
   const [listOpen, setListOpen] = useState(false);
+  const [globalReleaseMode, setGlobalReleaseMode] =
+    useState<ReleaseAssetMode>('all');
+  const [globalReleaseKeepLast, setGlobalReleaseKeepLast] = useState(5);
 
   const fetchData = useCallback(async () => {
-    const [repoRes, releaseRes] = await Promise.all([
+    const [repoRes, releaseRes, settingsRes] = await Promise.all([
       fetch(`/api/repos/${id}`),
       fetch(`/api/repos/${id}/releases`),
+      fetch('/api/settings'),
     ]);
     if (repoRes.ok) {
       const data = await repoRes.json();
@@ -43,6 +49,21 @@ export default function RepoDetail() {
     if (releaseRes.ok) {
       const data = await releaseRes.json();
       setReleases(data);
+    }
+    if (settingsRes.ok) {
+      const data = await settingsRes.json();
+      const s = data.settings;
+      if (s) {
+        const mode = (s.release_asset_mode ||
+          (s.download_release_assets === false ? 'none' : 'all')) as ReleaseAssetMode;
+        setGlobalReleaseMode(mode);
+        setGlobalReleaseKeepLast(
+          typeof s.release_asset_keep_last === 'number' &&
+            s.release_asset_keep_last >= 1
+            ? s.release_asset_keep_last
+            : 5
+        );
+      }
     }
     setLoading(false);
   }, [id]);
@@ -422,12 +443,30 @@ export default function RepoDetail() {
         />
       </div>
 
-      <div className="mb-6">
+      <div className="mb-6 space-y-3">
         <LocalDescriptionEditor
           repoId={String(id)}
           value={repo.local_description}
           onSaved={(next) =>
             setRepo((r: any) => (r ? { ...r, local_description: next } : r))
+          }
+        />
+        <ReleaseAssetPolicyEditor
+          repoId={String(id)}
+          mode={repo.release_asset_mode}
+          keepLast={repo.release_asset_keep_last}
+          globalMode={globalReleaseMode}
+          globalKeepLast={globalReleaseKeepLast}
+          onSaved={(next) =>
+            setRepo((r: any) =>
+              r
+                ? {
+                    ...r,
+                    release_asset_mode: next.release_asset_mode,
+                    release_asset_keep_last: next.release_asset_keep_last,
+                  }
+                : r
+            )
           }
         />
       </div>

@@ -9,6 +9,14 @@ import {
   getSettings,
   getDb,
   countArchiveReleases,
+  findReleaseAsset,
+  updateReleaseAsset,
+  resolveReleaseAssetPolicy,
+  getArchiveReleaseAssetPolicy,
+  getArchiveReleasesSorted,
+  shouldCacheReleaseAtIndex,
+  pruneReleaseAssets,
+  type ReleaseAssetMode,
 } from '@/lib/db';
 import { syncMirror, isRemoteMissingError, withMirrorLock } from '@/lib/git';
 import {
@@ -27,7 +35,6 @@ import {
   hostnameFromAssetUrl,
   requestAssetHostApproval,
 } from '@/lib/asset-hosts';
-import { findReleaseAsset, updateReleaseAsset } from '@/lib/db';
 import {
   archiveReadmeUrlsFromMirror,
   hasWaybackCredentials,
@@ -43,6 +50,8 @@ export interface RepoLike {
   mirror_path: string;
   clone_url?: string;
   is_private?: boolean;
+  release_asset_mode?: ReleaseAssetMode | null;
+  release_asset_keep_last?: number | null;
 }
 
 /**
@@ -286,15 +295,12 @@ export async function syncRepo(
           ? settings.max_asset_size_mb * 1024 * 1024
           : Infinity;
 
+      const downloadPolicy = resolveReleaseAssetPolicy(settings, repo);
+
       options.onProgress?.(`Fetching ${releases.length} releases...`);
 
-      let releaseIdx = 0;
+      // Pass 1: upsert release metadata for every remote release
       for (const rel of releases) {
-        releaseIdx++;
-        options.onProgress?.(
-          `Downloading release ${releaseIdx}/${releases.length}`
-        );
-
         if (!dbTagExists(archiveId, rel.tag_name)) {
           addRelease({
             archive_id: archiveId,
@@ -306,9 +312,29 @@ export async function syncRepo(
           newReleases++;
           newReleaseTags.push(rel.tag_name);
         }
+      }
+
+      // Which releases should have assets cached for this user's download policy
+      // (0 = newest). Archive-wide prune later uses the most-permissive member policy.
+      const sortedLocal = getArchiveReleasesSorted(archiveId);
+      const cacheableReleaseIds = new Set<number>();
+      sortedLocal.forEach((r, i) => {
+        if (shouldCacheReleaseAtIndex(downloadPolicy, i)) {
+          cacheableReleaseIds.add(r.id);
+        }
+      });
+
+      let releaseIdx = 0;
+      for (const rel of releases) {
+        releaseIdx++;
+        options.onProgress?.(
+          `Downloading release ${releaseIdx}/${releases.length}`
+        );
 
         const releaseRow = getReleaseByTag(archiveId, rel.tag_name);
         if (!releaseRow) continue;
+
+        const shouldCacheAssets = cacheableReleaseIds.has(releaseRow.id);
 
         for (const asset of rel.assets) {
           const existing = findReleaseAsset(releaseRow.id, asset.name);
@@ -331,11 +357,16 @@ export async function syncRepo(
 
           let downloaded = false;
           const tooLarge = asset.size > 0 && asset.size > maxBytes;
-          let skipReason: 'settings' | 'size' | 'host' | 'rejected' | null =
-            null;
+          let skipReason:
+            | 'settings'
+            | 'policy'
+            | 'size'
+            | 'host'
+            | 'rejected'
+            | null = null;
 
-          if (!settings.download_release_assets) {
-            skipReason = 'settings';
+          if (!shouldCacheAssets) {
+            skipReason = 'policy';
             skippedAssets++;
           } else if (tooLarge) {
             skipReason = 'size';
@@ -424,8 +455,18 @@ export async function syncRepo(
         }
       }
 
+      // Drop assets outside the most-permissive policy of any archive member
+      const prunePolicy = getArchiveReleaseAssetPolicy(archiveId);
+      const pruned = pruneReleaseAssets(archiveId, prunePolicy);
+
       let releaseMsg = `releases: ${releases.length} fetched (${newReleases} new, ${newAssets} assets)`;
       if (skippedAssets > 0) releaseMsg += `, ${skippedAssets} skipped`;
+      if (pruned > 0) releaseMsg += `, ${pruned} pruned`;
+      if (downloadPolicy.mode === 'last_n') {
+        releaseMsg += ` [keep last ${downloadPolicy.keep_last}]`;
+      } else if (downloadPolicy.mode === 'none') {
+        releaseMsg += ' [assets off]';
+      }
       if (awaitingHostApproval > 0) {
         releaseMsg += `, ${awaitingHostApproval} awaiting domain approval (${[...pendingHosts].join(', ')})`;
       }

@@ -177,7 +177,7 @@ describe('db atomic persistence', () => {
     expect(fs.existsSync(wrongMirror)).toBe(false);
 
     const onDisk = JSON.parse(fs.readFileSync(dbPath(), 'utf8'));
-    expect(onDisk.schema_version).toBe(4);
+    expect(onDisk.schema_version).toBe(5);
     expect(onDisk.archives[0].platform).toBe('gitlab');
   });
 });

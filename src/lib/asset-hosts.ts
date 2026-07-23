@@ -17,6 +17,9 @@ import {
   upsertPendingAssetHost,
   removePendingAssetHost,
   getAllReleaseAssets,
+  resolveReleaseAssetPolicy,
+  getArchiveReleasesSorted,
+  shouldCacheReleaseAtIndex,
   type PendingAssetHostApproval,
 } from '@/lib/db';
 import { isTrustedAssetHost, parseTrustedAssetUrl } from '@/lib/safe-url';
@@ -274,15 +277,39 @@ export async function downloadMissingAssetsFromHost(
   if (!host) return 0;
 
   const settings = getSettings();
-  if (!settings.download_release_assets) return 0;
+  if (settings.release_asset_mode === 'none' || !settings.download_release_assets) {
+    return 0;
+  }
 
   const userId = tryGetUserId() ?? AUTOLOGIN_USER_ID;
   const db = getDb();
-  const userArchiveIds = new Set(db.repos.map((r) => r.archive_id));
+  const userRepos = db.repos;
+  const userArchiveIds = new Set(userRepos.map((r) => r.archive_id));
   const releaseById = new Map(db.releases.map((r) => [r.id, r]));
   // Prefer user-scoped assets from getDb; fall back to global for safety
   const assets =
     db.releaseAssets.length > 0 ? db.releaseAssets : getAllReleaseAssets();
+
+  // Per-archive: which release ids this user would cache under their policy.
+  // Missing entry = no membership; 'all' = every release; Set = explicit allow-list.
+  const cacheableByArchive = new Map<number, 'all' | Set<number>>();
+  for (const membership of userRepos) {
+    const policy = resolveReleaseAssetPolicy(settings, membership);
+    if (policy.mode === 'none') {
+      cacheableByArchive.set(membership.archive_id, new Set());
+      continue;
+    }
+    if (policy.mode === 'all') {
+      cacheableByArchive.set(membership.archive_id, 'all');
+      continue;
+    }
+    const sorted = getArchiveReleasesSorted(membership.archive_id);
+    const keep = new Set<number>();
+    sorted.forEach((r, i) => {
+      if (shouldCacheReleaseAtIndex(policy, i)) keep.add(r.id);
+    });
+    cacheableByArchive.set(membership.archive_id, keep);
+  }
 
   let downloaded = 0;
   const maxBytes =
@@ -297,6 +324,10 @@ export async function downloadMissingAssetsFromHost(
 
     const release = releaseById.get(asset.release_id);
     if (!release || !userArchiveIds.has(release.archive_id)) continue;
+
+    const keep = cacheableByArchive.get(release.archive_id);
+    if (keep === undefined) continue;
+    if (keep !== 'all' && !keep.has(release.id)) continue;
 
     const archive = getArchiveById(release.archive_id);
     if (!archive) continue;

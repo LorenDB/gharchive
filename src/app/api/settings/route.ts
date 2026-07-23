@@ -3,7 +3,9 @@ import {
   getSettings,
   updateSettings,
   DEFAULT_SETTINGS,
+  isReleaseAssetMode,
   type Settings,
+  type ReleaseAssetMode,
 } from '@/lib/db';
 import {
   getSchedulerStatus,
@@ -119,8 +121,34 @@ export async function PUT(req: NextRequest) {
         patch.sync_interval_hours = n;
       }
 
-      if (typeof body.download_release_assets === 'boolean') {
+      if (body.release_asset_mode !== undefined) {
+        if (!isReleaseAssetMode(body.release_asset_mode)) {
+          return NextResponse.json(
+            { error: 'release_asset_mode must be all, none, or last_n' },
+            { status: 400 }
+          );
+        }
+        patch.release_asset_mode = body.release_asset_mode as ReleaseAssetMode;
+        patch.download_release_assets = body.release_asset_mode !== 'none';
+      } else if (typeof body.download_release_assets === 'boolean') {
+        // Legacy: boolean maps to all/none (does not force last_n off if already set)
         patch.download_release_assets = body.download_release_assets;
+        if (body.download_release_assets === false) {
+          patch.release_asset_mode = 'none';
+        } else if (getSettings().release_asset_mode === 'none') {
+          patch.release_asset_mode = 'all';
+        }
+      }
+
+      if (body.release_asset_keep_last !== undefined) {
+        const n = Number(body.release_asset_keep_last);
+        if (!Number.isFinite(n) || n < 1 || n > 10_000) {
+          return NextResponse.json(
+            { error: 'release_asset_keep_last must be between 1 and 10000' },
+            { status: 400 }
+          );
+        }
+        patch.release_asset_keep_last = Math.round(n);
       }
 
       if (body.max_asset_size_mb !== undefined) {

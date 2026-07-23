@@ -8,6 +8,8 @@ interface Settings {
   auto_sync_enabled: boolean;
   sync_interval_hours: number;
   download_release_assets: boolean;
+  release_asset_mode: 'all' | 'none' | 'last_n';
+  release_asset_keep_last: number;
   max_asset_size_mb: number;
   concurrent_syncs: number;
   auto_scan_stars_enabled: boolean;
@@ -988,27 +990,105 @@ export default function SettingsClient({
             <section className="surface p-5 sm:p-6">
               <h2 className="text-base font-semibold text-white mb-1">Release assets</h2>
               <p className="hint !mt-0 mb-5">
-                Control whether binary assets from GitHub, GitLab, Codeberg, or other
-                release hosts are stored locally.
+                Control how binary assets from GitHub, GitLab, Codeberg, or other
+                release hosts are stored locally. Release metadata is always archived.
+                Individual repos can override this under the repo page.
               </p>
 
-              <div className="flex items-start justify-between gap-4 mb-5">
-                <div>
-                  <p className="text-sm font-medium text-ink-200">Download assets</p>
-                  <p className="hint !mt-1">
-                    When off, release metadata is still archived but files are not downloaded.
+              <div className="mb-5">
+                <p className="text-sm font-medium text-ink-200 mb-3">Archive mode</p>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {(
+                    [
+                      {
+                        mode: 'all' as const,
+                        label: 'All releases',
+                        desc: 'Cache assets for every release',
+                      },
+                      {
+                        mode: 'last_n' as const,
+                        label: 'Last N',
+                        desc: 'Keep only the newest N releases',
+                      },
+                      {
+                        mode: 'none' as const,
+                        label: 'None',
+                        desc: 'Metadata only — no files',
+                      },
+                    ] as const
+                  ).map((opt) => {
+                    const active =
+                      (draft.release_asset_mode ||
+                        (draft.download_release_assets ? 'all' : 'none')) ===
+                      opt.mode;
+                    return (
+                      <button
+                        key={opt.mode}
+                        type="button"
+                        onClick={() =>
+                          setDraft({
+                            ...draft,
+                            release_asset_mode: opt.mode,
+                            download_release_assets: opt.mode !== 'none',
+                          })
+                        }
+                        className={`rounded-xl border px-3 py-3 text-left transition ${
+                          active
+                            ? 'border-amber-400/50 bg-amber-400/10'
+                            : 'border-ink-800 bg-ink-950/40 hover:border-ink-700'
+                        }`}
+                      >
+                        <span
+                          className={`block text-sm font-medium ${
+                            active ? 'text-amber-200' : 'text-ink-200'
+                          }`}
+                        >
+                          {opt.label}
+                        </span>
+                        <span className="block text-[11px] text-ink-500 mt-0.5">
+                          {opt.desc}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {(draft.release_asset_mode || 'all') === 'last_n' && (
+                <div className="mb-5">
+                  <label className="label" htmlFor="keep-last">
+                    Keep last N releases
+                  </label>
+                  <input
+                    id="keep-last"
+                    type="number"
+                    min={1}
+                    max={10000}
+                    className="input max-w-[12rem]"
+                    value={draft.release_asset_keep_last ?? 5}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        release_asset_keep_last: Math.max(
+                          1,
+                          parseInt(e.target.value || '1', 10)
+                        ),
+                      })
+                    }
+                  />
+                  <p className="hint">
+                    Only the newest N releases have assets cached. When a new release
+                    appears, assets for the oldest beyond N are dropped automatically.
                   </p>
                 </div>
-                <Toggle
-                  checked={draft.download_release_assets}
-                  onChange={(v) => setDraft({ ...draft, download_release_assets: v })}
-                  label="Download release assets"
-                />
-              </div>
+              )}
 
               <div
                 className={
-                  draft.download_release_assets ? '' : 'opacity-40 pointer-events-none'
+                  (draft.release_asset_mode ||
+                    (draft.download_release_assets ? 'all' : 'none')) !== 'none'
+                    ? ''
+                    : 'opacity-40 pointer-events-none'
                 }
               >
                 <label className="label" htmlFor="max-asset">

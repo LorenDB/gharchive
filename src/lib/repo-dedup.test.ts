@@ -658,7 +658,7 @@ describe('schema v2 → v3 migration', () => {
     const onDisk = JSON.parse(
       fs.readFileSync(path.join(tempDir, 'db.json'), 'utf8')
     );
-    expect(onDisk.schema_version).toBe(4);
+    expect(onDisk.schema_version).toBe(5);
     expect(onDisk.repos.every((r: { archive_id: number }) => r.archive_id)).toBe(
       true
     );
