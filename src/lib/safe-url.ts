@@ -182,6 +182,60 @@ export function assetAuthForHostname(hostname: string): {
 }
 
 /**
+ * Username/password for git HTTP(S) auth on a known clone host.
+ * Mirrors the assetAuthForHostname allowlist: tokens are only ever sent to
+ * the platform's own domain — never to user-approved or arbitrary hosts.
+ *
+ * GitHub accepts any non-empty username with a PAT as the password
+ * (x-access-token is the documented convention). GitLab/Forgejo use
+ * any username with the token, or oauth2 for GitLab.
+ */
+export async function gitAuthForCloneUrl(rawUrl: string): Promise<{
+  username: string;
+  password: string;
+} | null> {
+  if (!rawUrl) return null;
+  let u: URL;
+  try {
+    u = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+  if (isUnsafeOutboundHostname(u.hostname)) return null;
+
+  const host = normalizeHostname(u.hostname);
+
+  if (host === 'github.com' || host.endsWith('.github.com')) {
+    // Same resolution order as the REST layer: linked account token, then env
+    const { getGithubToken } = await import('@/lib/db');
+    const token = getGithubToken()?.trim();
+    if (token) return { username: 'x-access-token', password: token };
+    return null;
+  }
+
+  if (host === 'gitlab.com' || host.endsWith('.gitlab.com')) {
+    const token =
+      process.env.GITLAB_TOKEN?.trim() ||
+      process.env.FORGEJO_TOKEN?.trim() ||
+      process.env.GITEA_TOKEN?.trim();
+    if (token) return { username: 'oauth2', password: token };
+    return null;
+  }
+
+  if (host === 'codeberg.org') {
+    const token =
+      process.env.CODEBERG_TOKEN?.trim() ||
+      process.env.FORGEJO_TOKEN?.trim() ||
+      process.env.GITEA_TOKEN?.trim();
+    if (token) return { username: 'oauth2', password: token };
+    return null;
+  }
+
+  return null;
+}
+
+/**
  * Resolve `child` and ensure it stays under `parent` (after realpath when possible).
  * Prevents path traversal / symlink escape for local asset reads.
  */

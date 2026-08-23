@@ -224,7 +224,10 @@ async function fetchGitHubReleases(repoPath: string): Promise<ReleaseData[]> {
   };
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
-  const res = await fetch(url, { headers });
+  const res = await fetch(url, {
+    headers,
+    signal: AbortSignal.timeout(30_000),
+  });
   if (!res.ok) throw new Error(`GitHub API error: ${res.status}`);
 
   const releases: any[] = await res.json();
@@ -249,7 +252,10 @@ async function fetchGitLabReleases(projectPath: string): Promise<ReleaseData[]> 
   const headers: Record<string, string> = {};
   if (token) headers['PRIVATE-TOKEN'] = token;
 
-  const res = await fetch(url, { headers });
+  const res = await fetch(url, {
+    headers,
+    signal: AbortSignal.timeout(30_000),
+  });
   if (!res.ok) throw new Error(`GitLab API error: ${res.status}`);
 
   const releases: any[] = await res.json();

@@ -119,7 +119,7 @@ export async function syncRepo(
 
     try {
       const gitResult = await withMirrorLock(repo.mirror_path, () =>
-        syncMirror(repo.mirror_path)
+        syncMirror(repo.mirror_path, repo.clone_url)
       );
       messages.push(`git: ${gitResult.message || 'up to date'}`);
 

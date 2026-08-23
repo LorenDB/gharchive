@@ -29,6 +29,8 @@ export type FetchRemoteMetaOptions = {
   cloneUrl?: string | null;
 };
 
+const META_TIMEOUT_MS = 30_000;
+
 export async function fetchRemoteRepoMeta(
   platform: string,
   owner: string,
@@ -97,7 +99,7 @@ async function fetchGithubMeta(
 
   const res = await fetch(
     `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`,
-    { headers }
+    { headers, signal: AbortSignal.timeout(META_TIMEOUT_MS) }
   );
   if (!res.ok) {
     throw new Error(`GitHub API error: ${res.status}`);
@@ -147,7 +149,7 @@ async function fetchGitlabMeta(
 
   const res = await fetch(
     `https://gitlab.com/api/v4/projects/${encoded}`,
-    { headers }
+    { headers, signal: AbortSignal.timeout(META_TIMEOUT_MS) }
   );
   if (!res.ok) {
     throw new Error(`GitLab API error: ${res.status}`);

@@ -8,10 +8,24 @@ import {
   tryGetUserId,
 } from '@/lib/user-context';
 import { hasEnoughMemory } from '@/lib/memory';
+import { gitAuthForCloneUrl } from '@/lib/safe-url';
 
 const execFileAsync = promisify(execFileCb);
 
 const GIT_MAX_BUFFER = 10 * 1024 * 1024;
+
+/** Upper bound for a single git fetch so a stalled remote can't wedge the scheduler. */
+export const GIT_FETCH_TIMEOUT_MS = 15 * 60 * 1000;
+
+/** Servers have no TTY: never let git prompt for credentials (hangs the scheduler). */
+const GIT_NO_PROMPT_ENV: Record<string, string> = {
+  GIT_TERMINAL_PROMPT: '0',
+  GIT_ASKPASS: '/bin/true',
+  // Abort transfers that move <1 KiB/s for 60s — a hung host shouldn't
+  // occupy the fetch slot for the full hard timeout.
+  GIT_HTTP_LOW_SPEED_LIMIT: '1024',
+  GIT_HTTP_LOW_SPEED_TIME: '60',
+};
 
 function getMirrorsDir(): string {
   const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
@@ -23,23 +37,56 @@ function getMirrorsDir(): string {
  */
 function runGit(
   args: string[],
-  opts: { cwd?: string; maxBuffer?: number } = {}
+  opts: {
+    cwd?: string;
+    maxBuffer?: number;
+    env?: Record<string, string>;
+    timeoutMs?: number;
+  } = {}
 ): Promise<{ stdout: string; stderr: string }> {
   return execFileAsync('git', args, {
     encoding: 'utf8',
     cwd: opts.cwd,
     maxBuffer: opts.maxBuffer ?? GIT_MAX_BUFFER,
+    timeout: opts.timeoutMs,
+    killSignal: 'SIGKILL',
+    env: { ...process.env, ...GIT_NO_PROMPT_ENV, ...opts.env },
   }) as Promise<{ stdout: string; stderr: string }>;
 }
 
 function runGitBuffer(
   args: string[],
-  opts: { maxBuffer?: number } = {}
+  opts: { maxBuffer?: number; env?: Record<string, string> } = {}
 ): Promise<{ stdout: Buffer; stderr: Buffer }> {
   return execFileAsync('git', args, {
     encoding: 'buffer',
     maxBuffer: opts.maxBuffer ?? GIT_MAX_BUFFER,
+    env: { ...process.env, ...GIT_NO_PROMPT_ENV, ...opts.env },
   }) as Promise<{ stdout: Buffer; stderr: Buffer }>;
+}
+
+/**
+ * Per-invocation `-c` args authenticating HTTPS clones/fetches on known hosts
+ * (github/gitlab/codeberg) with env-provided tokens. Sent as a transient http
+ * extraheader so the token never persists in the bare repo (FETCH_HEAD/config)
+ * and the stored remote URL stays anonymous.
+ */
+async function authConfigArgs(cloneUrl?: string): Promise<string[]> {
+  if (!cloneUrl) return [];
+  const auth = await gitAuthForCloneUrl(cloneUrl);
+  if (!auth) return [];
+  try {
+    const origin = new URL(cloneUrl).origin;
+    const basic = Buffer.from(
+      `${auth.username}:${auth.password}`
+    ).toString('base64');
+    return [
+      '-c',
+      `http.${origin}/.extraheader=Authorization: Basic ${basic}`,
+    ];
+  } catch {
+    return [];
+  }
 }
 
 function assertMemory(label: string): void {
@@ -150,7 +197,16 @@ export async function cloneMirror(
     );
     fs.mkdirSync(tmpDir, { recursive: true });
     try {
-      await runGit(['clone', '--bare', '--mirror', cloneUrl, tmpDir]);
+      await runGit(
+        [
+          ...(await authConfigArgs(cloneUrl)),
+          'clone',
+          '--bare',
+          '--mirror',
+          cloneUrl,
+          tmpDir,
+        ]
+      );
       try {
         fs.renameSync(tmpDir, mirrorPath);
       } catch (renameErr: any) {
@@ -224,7 +280,10 @@ export interface MirrorSyncResult {
   historyDetails: string[];
 }
 
-export async function syncMirror(mirrorPath: string): Promise<MirrorSyncResult> {
+export async function syncMirror(
+  mirrorPath: string,
+  cloneUrl?: string
+): Promise<MirrorSyncResult> {
   assertMemory(`sync ${mirrorPath}`);
   await verifyGcProtection(mirrorPath);
 
@@ -261,12 +320,13 @@ export async function syncMirror(mirrorPath: string): Promise<MirrorSyncResult> 
   let stderr = '';
   try {
     const result = await runGit([
+      ...(await authConfigArgs(cloneUrl)),
       '-C',
       mirrorPath,
       'fetch',
       'origin',
       '+refs/*:refs/*',
-    ]);
+    ], { timeoutMs: GIT_FETCH_TIMEOUT_MS });
     stdout = result.stdout;
     stderr = result.stderr;
   } catch (err: any) {

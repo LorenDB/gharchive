@@ -1,7 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import {
   isTrustedAssetHost,
   parseTrustedAssetUrl,
@@ -10,7 +10,14 @@ import {
   contentDisposition,
   isUnsafeOutboundHostname,
   assetAuthForHostname,
+  gitAuthForCloneUrl,
 } from '@/lib/safe-url';
+
+const mockGetGithubToken = vi.fn();
+
+vi.mock('@/lib/db', () => ({
+  getGithubToken: () => mockGetGithubToken(),
+}));
 
 describe('isUnsafeOutboundHostname', () => {
   it('blocks loopback and localhost names', () => {
@@ -69,6 +76,72 @@ describe('assetAuthForHostname', () => {
     process.env.FORGEJO_TOKEN = 'forge_secret';
     expect(assetAuthForHostname('codeberg.org')?.value).toBe('token cb_tok');
     expect(assetAuthForHostname('forge.example.com')).toBeNull();
+  });
+});
+
+describe('gitAuthForCloneUrl', () => {
+  const prev = {
+    GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+    GITLAB_TOKEN: process.env.GITLAB_TOKEN,
+    FORGEJO_TOKEN: process.env.FORGEJO_TOKEN,
+    CODEBERG_TOKEN: process.env.CODEBERG_TOKEN,
+  };
+
+  beforeEach(() => {
+    mockGetGithubToken.mockReset();
+    mockGetGithubToken.mockReturnValue(undefined);
+  });
+
+  afterEach(() => {
+    for (const [k, v] of Object.entries(prev)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  it('returns x-access-token auth for github clone URLs', async () => {
+    mockGetGithubToken.mockReturnValue('ghp_test');
+    expect(
+      await gitAuthForCloneUrl('https://github.com/acme/widgets.git')
+    ).toEqual({
+      username: 'x-access-token',
+      password: 'ghp_test',
+    });
+  });
+
+  it('returns oauth2 auth for gitlab and codeberg clone URLs', async () => {
+    process.env.GITLAB_TOKEN = 'gl_tok';
+    expect(
+      await gitAuthForCloneUrl('https://gitlab.com/acme/widgets.git')
+    ).toEqual({
+      username: 'oauth2',
+      password: 'gl_tok',
+    });
+
+    process.env.GITLAB_TOKEN = '';
+    process.env.CODEBERG_TOKEN = 'cb_tok';
+    expect(
+      await gitAuthForCloneUrl('https://codeberg.org/acme/widgets.git')
+    ).toEqual({ username: 'oauth2', password: 'cb_tok' });
+  });
+
+  it('returns null when no token is configured', async () => {
+    expect(
+      await gitAuthForCloneUrl('https://github.com/acme/widgets.git')
+    ).toBeNull();
+  });
+
+  it('never sends tokens to arbitrary hosts or unsafe targets', async () => {
+    mockGetGithubToken.mockReturnValue('ghp_test');
+    expect(await gitAuthForCloneUrl('https://git.example.com/acme/w.git')).toBeNull();
+    expect(await gitAuthForCloneUrl('https://github.com.evil.com/x/y.git')).toBeNull();
+    expect(await gitAuthForCloneUrl('http://127.0.0.1/foo/bar.git')).toBeNull();
+    expect(await gitAuthForCloneUrl('file:///etc/passwd')).toBeNull();
+  });
+
+  it('returns null for malformed URLs', async () => {
+    expect(await gitAuthForCloneUrl('')).toBeNull();
+    expect(await gitAuthForCloneUrl('not a url')).toBeNull();
   });
 });
 
