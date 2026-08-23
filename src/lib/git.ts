@@ -9,6 +9,7 @@ import {
 } from '@/lib/user-context';
 import { hasEnoughMemory } from '@/lib/memory';
 import { gitAuthForCloneUrl } from '@/lib/safe-url';
+import { getCachedDirSize, invalidateDirSize } from '@/lib/dir-size';
 
 const execFileAsync = promisify(execFileCb);
 
@@ -482,6 +483,7 @@ export async function deleteMirror(mirrorPath: string): Promise<void> {
   }
   if (fs.existsSync(mirrorPath)) {
     fs.rmSync(mirrorPath, { recursive: true, force: true });
+    invalidateDirSize(mirrorPath);
   }
 }
 
@@ -518,17 +520,7 @@ export async function mirrorStat(mirrorPath: string): Promise<{
 }
 
 function dirSize(dirPath: string): number {
-  let total = 0;
-  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-  for (const entry of entries) {
-    const full = path.join(dirPath, entry.name);
-    if (entry.isDirectory()) {
-      total += dirSize(full);
-    } else {
-      total += fs.statSync(full).size;
-    }
-  }
-  return total;
+  return getCachedDirSize(dirPath);
 }
 
 export async function getDefaultBranch(mirrorPath: string): Promise<string> {

@@ -1,4 +1,4 @@
-import { getSettings, listUserIds, DEFAULT_SETTINGS } from '@/lib/db';
+import { getSettings, listUserIds, listArchives, DEFAULT_SETTINGS } from '@/lib/db';
 import { getGithubAccount, getGithubToken } from '@/lib/db';
 import { getDb } from '@/lib/db';
 import type { Settings } from '@/lib/db';
@@ -12,6 +12,7 @@ import { runAsUserAsync } from '@/lib/user-context';
 import { hasEnoughMemory, getAdjustedConcurrency, getMemoryInfo } from '@/lib/memory';
 import { getDiskInfo, isStorageLow } from '@/lib/disk';
 import { sendAlert, isAlertsConfigured } from '@/lib/alerts';
+import { prewarmDirSizes } from '@/lib/dir-size';
 
 /** Check due work every minute; cadences come from per-user settings. */
 const TICK_MS = 60_000;
@@ -389,6 +390,17 @@ export function startScheduler() {
   const s = state();
   if (s.started) return;
   s.started = true;
+
+  // Prewarm directory-size cache so Settings/repo pages never block on a walk.
+  try {
+    prewarmDirSizes(
+      listArchives()
+        .map((a) => a.mirror_path || '')
+        .filter(Boolean)
+    );
+  } catch {
+    // db not ready yet — sizes will fill in lazily on first read
+  }
 
   setTimeout(() => {
     tick();

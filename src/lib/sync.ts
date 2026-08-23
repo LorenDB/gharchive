@@ -41,6 +41,7 @@ import {
   hasWaybackCredentials,
   waybackCredentialsFromSettings,
 } from '@/lib/wayback';
+import { invalidateDirSize, refreshDirSizeAsync } from '@/lib/dir-size';
 
 export interface RepoLike {
   id: number;
@@ -121,6 +122,9 @@ export async function syncRepo(
       const gitResult = await withMirrorLock(repo.mirror_path, () =>
         syncMirror(repo.mirror_path, repo.clone_url)
       );
+      // Mirror contents changed — refresh its cached size in the background.
+      invalidateDirSize(repo.mirror_path);
+      refreshDirSizeAsync(repo.mirror_path);
       messages.push(`git: ${gitResult.message || 'up to date'}`);
 
       if (gitResult.repoDeleted) {

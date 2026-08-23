@@ -7,6 +7,7 @@ import {
 } from '@/lib/user-context';
 import type { SessionUser } from '@/lib/session';
 import { resolveUserDisplayName } from '@/lib/format';
+import { getCachedDirSize } from '@/lib/dir-size';
 
 function getDataDir(): string {
   return process.env.DATA_DIR || path.join(process.cwd(), 'data');
@@ -619,21 +620,12 @@ function archiveById(d: Data, id: number): Archive | undefined {
   return d.archives.find((a) => a.id === id);
 }
 
-/** Best-effort recursive directory size for migration ranking. */
+/**
+ * Best-effort recursive directory size, served from the shared dir-size
+ * cache (stale-while-revalidate) so request paths never block on a walk.
+ */
 function dirSizeSafe(dirPath: string): number {
-  try {
-    if (!fs.existsSync(dirPath)) return 0;
-    let total = 0;
-    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-    for (const entry of entries) {
-      const full = path.join(dirPath, entry.name);
-      if (entry.isDirectory()) total += dirSizeSafe(full);
-      else total += fs.statSync(full).size;
-    }
-    return total;
-  } catch {
-    return 0;
-  }
+  return getCachedDirSize(dirPath || '');
 }
 
 function parseTimeMs(iso: string | null | undefined): number {
