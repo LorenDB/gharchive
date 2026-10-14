@@ -7,6 +7,11 @@ import {
   getLists,
   updateRepo,
   getRepoById,
+  getArchiveReleaseAssetPolicy,
+  countArchiveMembers,
+  isWiderPolicy,
+  resolveReleaseAssetPolicy,
+  getSettingsForUser,
 } from '@/lib/db';
 import { deleteMirror, mirrorStat, assertMirrorPathInside } from '@/lib/git';
 import { getReleasesRoot, isPathInside } from '@/lib/safe-url';
@@ -65,6 +70,10 @@ export async function GET(
       },
       allLists: getLists(),
       syncLogs: repoLogs,
+      retention: {
+        effective: getArchiveReleaseAssetPolicy(repo.archive_id),
+        members: countArchiveMembers(repo.archive_id),
+      },
     });
   });
 }
@@ -177,12 +186,27 @@ export async function PATCH(
     const updated = getRepoById(id)!;
     const { mirror_path: _mp, ...safeRepo } = updated;
 
+    // Effective retention across all archive members — a per-repo override
+    // narrower than a co-member's policy is widened for retention (shared
+    // files can't be dropped without another member re-downloading them).
+    const effective = getArchiveReleaseAssetPolicy(updated.archive_id);
+    const members = countArchiveMembers(updated.archive_id);
+    const own = resolveReleaseAssetPolicy(
+      getSettingsForUser(updated.owner_id),
+      updated
+    );
+
     return NextResponse.json({
       repo: {
         ...safeRepo,
         lists: getRepoLists(updated.id),
       },
       pruned_assets,
+      retention: {
+        effective,
+        members,
+        widened_by_others: isWiderPolicy(effective, own),
+      },
     });
   });
 }

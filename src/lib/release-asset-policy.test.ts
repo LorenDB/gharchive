@@ -441,4 +441,83 @@ describe('pruneReleaseAssets', () => {
       expect(pruneAllArchives()).toBe(0);
     });
   });
+
+  it('per-repo override narrower than a co-member is widened for retention', async () => {
+    const { countArchiveMembers, isWiderPolicy } = await import('@/lib/db');
+    runAsUser(AUTOLOGIN_USER_ID, () => {
+      warmDb();
+      const archive = createArchive({
+        platform: 'github',
+        owner: 'acme',
+        name: 'vetoed',
+        clone_url: 'https://github.com/acme/vetoed.git',
+        mirror_path: path.join(tempDir, 'mirrors', 'github', 'acme', 'vetoed.git'),
+        last_synced_at: null,
+        is_private: false,
+      });
+      const repo = linkUserToArchive(archive.id);
+      for (let i = 1; i <= 4; i++) {
+        const rel = addRelease({
+          archive_id: archive.id,
+          tag_name: `v${i}`,
+          name: `v${i}`,
+          body: null,
+          published_at: `2024-0${i}-01T00:00:00Z`,
+        });
+        const fp = path.join(tempDir, 'vetoed-assets', `v${i}.bin`);
+        fs.mkdirSync(path.dirname(fp), { recursive: true });
+        fs.writeFileSync(fp, 'x');
+        addReleaseAsset({
+          release_id: rel.id,
+          name: `v${i}.bin`,
+          content_type: null,
+          size: 1,
+          file_path: fp,
+          download_url: null,
+        });
+      }
+
+      // Owner sets a restrictive per-repo override…
+      // …but a second member on defaults (all) widens retention to all,
+      // so saving the override prunes nothing and files stay.
+      runAsUser('bob', () => linkUserToArchive(archive.id));
+      const prunedOnSave = updateRepo(repo.id, {
+        release_asset_mode: 'last_n',
+        release_asset_keep_last: 1,
+      });
+      expect(prunedOnSave).toBe(0);
+      expect(countArchiveMembers(archive.id)).toBe(2);
+      expect(getArchiveReleaseAssetPolicy(archive.id)).toEqual({
+        mode: 'all',
+        keep_last: 0,
+      });
+      expect(
+        isWiderPolicy(getArchiveReleaseAssetPolicy(archive.id), {
+          mode: 'last_n',
+          keep_last: 1,
+        })
+      ).toBe(true);
+      expect(pruneReleaseAssets(archive.id)).toBe(0);
+      expect(fs.existsSync(path.join(tempDir, 'vetoed-assets', 'v1.bin'))).toBe(true);
+    });
+  });
+
+  it('isWiderPolicy ranks none < last_n < all', async () => {
+    const { isWiderPolicy } = await import('@/lib/db');
+    expect(
+      isWiderPolicy({ mode: 'all', keep_last: 0 }, { mode: 'last_n', keep_last: 10000 })
+    ).toBe(true);
+    expect(
+      isWiderPolicy({ mode: 'last_n', keep_last: 5 }, { mode: 'last_n', keep_last: 3 })
+    ).toBe(true);
+    expect(
+      isWiderPolicy({ mode: 'last_n', keep_last: 3 }, { mode: 'last_n', keep_last: 3 })
+    ).toBe(false);
+    expect(
+      isWiderPolicy({ mode: 'none', keep_last: 0 }, { mode: 'none', keep_last: 0 })
+    ).toBe(false);
+    expect(
+      isWiderPolicy({ mode: 'last_n', keep_last: 1 }, { mode: 'all', keep_last: 0 })
+    ).toBe(false);
+  });
 });

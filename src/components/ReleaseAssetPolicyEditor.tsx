@@ -15,6 +15,10 @@ export default function ReleaseAssetPolicyEditor({
   keepLast,
   globalMode,
   globalKeepLast,
+  effectiveMode,
+  effectiveKeepLast,
+  memberCount,
+  widenedByOthers,
   onSaved,
 }: {
   repoId: string;
@@ -22,9 +26,18 @@ export default function ReleaseAssetPolicyEditor({
   keepLast: number | null | undefined;
   globalMode: Mode;
   globalKeepLast: number;
+  effectiveMode?: Mode | null;
+  effectiveKeepLast?: number | null;
+  memberCount?: number | null;
+  widenedByOthers?: boolean;
   onSaved: (next: {
     release_asset_mode: Mode | null;
     release_asset_keep_last: number | null;
+    retention?: {
+      effective: { mode: Mode; keep_last: number };
+      members: number;
+      widened_by_others?: boolean;
+    } | null;
   }) => void;
 }) {
   const [overrideMode, setOverrideMode] = useState<OverrideMode>(
@@ -74,8 +87,17 @@ export default function ReleaseAssetPolicyEditor({
       onSaved({
         release_asset_mode: nextMode,
         release_asset_keep_last: nextKeep,
+        retention: (data.retention as {
+          effective: { mode: Mode; keep_last: number };
+          members: number;
+          widened_by_others?: boolean;
+        }) ?? null,
       });
-      setMessage('Saved');
+      const pruned =
+        typeof data.pruned_assets === 'number' ? data.pruned_assets : null;
+      setMessage(
+        pruned != null && pruned > 0 ? `Saved · pruned ${pruned}` : 'Saved'
+      );
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -113,6 +135,19 @@ export default function ReleaseAssetPolicyEditor({
           </span>
           .
         </p>
+        {widenedByOthers && (memberCount ?? 0) > 1 && (
+          <p className="hint !mt-1 text-amber-400/90">
+            Archive retention is widened to{' '}
+            {effectiveMode === 'all'
+              ? 'all releases'
+              : effectiveMode === 'last_n'
+                ? `last ${effectiveKeepLast}`
+                : 'none'}{' '}
+            because {memberCount} accounts share this archive — prune keeps
+            what any member wants. Tighten the other members'
+            settings/overrides to shrink it.
+          </p>
+        )}
       </div>
 
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 mb-3">

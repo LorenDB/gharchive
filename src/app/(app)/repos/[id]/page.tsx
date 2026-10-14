@@ -33,6 +33,11 @@ export default function RepoDetail() {
   const [globalReleaseMode, setGlobalReleaseMode] =
     useState<ReleaseAssetMode>('all');
   const [globalReleaseKeepLast, setGlobalReleaseKeepLast] = useState(5);
+  const [retention, setRetention] = useState<{
+    effective: { mode: ReleaseAssetMode; keep_last: number };
+    members: number;
+    widened_by_others?: boolean;
+  } | null>(null);
 
   const fetchData = useCallback(async () => {
     const [repoRes, releaseRes, settingsRes] = await Promise.all([
@@ -45,6 +50,7 @@ export default function RepoDetail() {
       setRepo(data.repo);
       setAllLists(data.allLists || []);
       setSyncLogs(data.syncLogs || []);
+      setRetention(data.retention ?? null);
     }
     if (releaseRes.ok) {
       const data = await releaseRes.json();
@@ -457,7 +463,11 @@ export default function RepoDetail() {
           keepLast={repo.release_asset_keep_last}
           globalMode={globalReleaseMode}
           globalKeepLast={globalReleaseKeepLast}
-          onSaved={(next) =>
+          effectiveMode={retention?.effective?.mode ?? null}
+          effectiveKeepLast={retention?.effective?.keep_last ?? null}
+          memberCount={retention?.members ?? null}
+          widenedByOthers={retention?.widened_by_others ?? false}
+          onSaved={(next) => {
             setRepo((r: any) =>
               r
                 ? {
@@ -466,8 +476,9 @@ export default function RepoDetail() {
                     release_asset_keep_last: next.release_asset_keep_last,
                   }
                 : r
-            )
-          }
+            );
+            if (next.retention) setRetention(next.retention);
+          }}
         />
       </div>
 

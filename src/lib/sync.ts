@@ -16,6 +16,8 @@ import {
   getArchiveReleasesSorted,
   shouldCacheReleaseAtIndex,
   pruneReleaseAssets,
+  isWiderPolicy,
+  countArchiveMembers,
   type ReleaseAssetMode,
 } from '@/lib/db';
 import { syncMirror, isRemoteMissingError, withMirrorLock } from '@/lib/git';
@@ -584,6 +586,18 @@ export async function syncRepo(
         releaseMsg += ' [assets off]';
       } else {
         releaseMsg += ' [all assets]';
+      }
+      // When co-members widen retention beyond this sync's policy, say so —
+      // otherwise a "keep last 5" repo that never prunes looks broken.
+      if (isWiderPolicy(prunePolicy, downloadPolicy)) {
+        const members = countArchiveMembers(archiveId);
+        const kept =
+          prunePolicy.mode === 'all'
+            ? 'all'
+            : prunePolicy.mode === 'none'
+              ? 'none'
+              : `last ${prunePolicy.keep_last}`;
+        releaseMsg += ` [retention widened to ${kept} by ${members} member${members === 1 ? '' : 's'}]`;
       }
       if (awaitingHostApproval > 0) {
         releaseMsg += `, ${awaitingHostApproval} awaiting domain approval (${[...pendingHosts].join(', ')})`;

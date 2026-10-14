@@ -2647,6 +2647,13 @@ export function compareReleasesNewestFirst(
  * Most-permissive release-asset policy across all memberships of an archive.
  * Used when pruning shared public asset trees so we never drop files another
  * member still wants.
+ *
+ * NOTE: this means a per-repo override narrower than a co-member's policy is
+ * widened for retention (never for downloads, which always use the syncing
+ * member's own policy). Narrowing to the strictest member instead would churn:
+ * member B's next sync would re-download what member A's sync just pruned.
+ * Callers that surface retention should also surface `countArchiveMembers`
+ * so the widening is explainable (see GET/PATCH /api/repos/[id]).
  */
 export function getArchiveReleaseAssetPolicy(
   archiveId: number
@@ -2660,6 +2667,17 @@ export function getArchiveReleaseAssetPolicy(
     resolveReleaseAssetPolicy(getSettingsForUser(m.owner_id), m)
   );
   return mergeReleaseAssetPolicies(policies);
+}
+
+/** True when policy `a` retains a superset of what `b` retains. */
+export function isWiderPolicy(a: ReleaseAssetPolicy, b: ReleaseAssetPolicy): boolean {
+  const rank = (m: ReleaseAssetMode) =>
+    m === 'none' ? 0 : m === 'last_n' ? 1 : 2;
+  if (rank(a.mode) !== rank(b.mode)) return rank(a.mode) > rank(b.mode);
+  if (a.mode === 'last_n' && b.mode === 'last_n') {
+    return a.keep_last > b.keep_last;
+  }
+  return false;
 }
 
 /**
