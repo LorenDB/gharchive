@@ -111,11 +111,30 @@ const g = globalThis as typeof globalThis & {
   __gharchiveAlertCooldowns?: Map<string, number>;
 };
 
+const MAX_COOLDOWN_ENTRIES = 5000;
+
 function cooldowns(): Map<string, number> {
   if (!g.__gharchiveAlertCooldowns) {
     g.__gharchiveAlertCooldowns = new Map();
   }
   return g.__gharchiveAlertCooldowns;
+}
+
+function pruneCooldowns(now: number): void {
+  const m = cooldowns();
+  if (m.size < MAX_COOLDOWN_ENTRIES) return;
+  // Evict expired entries first (per-category TTL), then oldest.
+  for (const [k, ts] of m) {
+    // Entries older than 48h are definitely stale regardless of category.
+    if (now - ts > 48 * 3600_000) m.delete(k);
+    if (m.size < MAX_COOLDOWN_ENTRIES) return;
+  }
+  // Still over capacity (e.g. new_release flood with unique subjects):
+  // drop oldest insertion-order entries.
+  for (const k of m.keys()) {
+    m.delete(k);
+    if (m.size < MAX_COOLDOWN_ENTRIES) break;
+  }
 }
 
 function categoryEnabled(settings: Settings, category: AlertCategory): boolean {
@@ -157,11 +176,12 @@ export async function sendAlert(
     }
 
     const userId = tryGetUserId() ?? 'system';
-    const subject = payload.subject ?? 'default';
+    const subject = (payload.subject ?? 'default').slice(0, 256);
     const cooldownKey = `${userId}:${payload.category}:${subject}`;
     const cooldownMs =
       payload.cooldownMs ?? DEFAULT_COOLDOWN_MS[payload.category] ?? 3600_000;
     const now = Date.now();
+    pruneCooldowns(now);
     const last = cooldowns().get(cooldownKey) ?? 0;
     if (cooldownMs > 0 && now - last < cooldownMs) {
       return { sent: false, skipped: 'cooldown' };
@@ -246,6 +266,21 @@ async function postToApprise(
     url = `${base}${path}`;
   }
 
+  // Outbound SSRF guard: never POST alerts to loopback/metadata hosts, even
+  // when an admin fat-fingers the URL (admin-CSRF defense in depth).
+  try {
+    const u = new URL(url);
+    const { isUnsafeOutboundHostname } = await import('@/lib/safe-url');
+    if (isUnsafeOutboundHostname(u.hostname)) {
+      return { ok: false, error: 'Apprise URL host not allowed' };
+    }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      return { ok: false, error: 'Apprise URL must be http(s)' };
+    }
+  } catch {
+    return { ok: false, error: 'Invalid Apprise URL' };
+  }
+
   const payload: Record<string, unknown> = {
     title: msg.title,
     body: msg.body,
@@ -282,9 +317,22 @@ async function postToApprise(
           `[alerts] Apprise partial failure (${res.status}) for ${msg.title}`
         );
       }
+      // Drain with a cap so a huge Apprise body can't OOM the scheduler.
+      try {
+        const cl = res.headers.get('content-length');
+        if (cl && Number(cl) > 256 * 1024) return { ok: true };
+        await res.text();
+      } catch {
+        // ignore drain errors
+      }
       return { ok: true };
     }
 
+    // Cap error bodies (Apprise may echo config on failure).
+    const lenHeader = res.headers.get('content-length');
+    if (lenHeader && Number(lenHeader) > 16 * 1024) {
+      return { ok: false, error: `Apprise HTTP ${res.status}` };
+    }
     const text = await res.text().catch(() => '');
     return {
       ok: false,

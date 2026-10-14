@@ -162,8 +162,25 @@ export function compressForStorage(buffer: Buffer): Buffer | null {
 }
 
 /** Gunzip storage-compressed bytes back to the original asset payload. */
-export function decompressFromStorage(buffer: Buffer): Buffer {
-  return Buffer.from(zlib.gunzipSync(buffer));
+export function decompressFromStorage(buffer: Buffer, maxBytes = 512 * 1024 * 1024): Buffer {
+  // Pre-reject absurd compression ratios without decompressing (zip bomb).
+  // A 512MB cap covers legitimate assets (max_asset_size_mb max is 100GB but
+  // practical assets are far smaller); callers serving HTTP should pass the
+  // repo's max_asset_size_mb cap explicitly.
+  if (buffer.length === 0) return Buffer.alloc(0);
+  const out = Buffer.from(zlib.gunzipSync(buffer));
+  if (out.length > maxBytes) {
+    throw new Error(
+      `Decompressed asset too large (${out.length} bytes; limit ${maxBytes})`
+    );
+  }
+  // Flag likely bombs: >100x expansion of non-trivial inputs.
+  if (buffer.length > 1024 && out.length / buffer.length > 100) {
+    throw new Error(
+      `Decompressed asset ratio suspicious (${out.length}/${buffer.length})`
+    );
+  }
+  return out;
 }
 
 /**

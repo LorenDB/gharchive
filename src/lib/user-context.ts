@@ -36,6 +36,17 @@ export function getRequiredUserId(): string {
 
 /** Sanitize OIDC sub (or similar) for filesystem paths. */
 export function safeUserPathSegment(userId: string): string {
-  const s = userId.replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^\.+/, '');
-  return (s || 'user').slice(0, 80);
+  const s = (userId || '').replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^\.+/, '');
+  const base = s || 'user';
+  // Short ids (the common case: UUID subs, `autologin`) keep their exact
+  // legacy segment so existing private mirrors/assets keep working.
+  if (base.length <= 48) return base;
+  // Long ids: truncate + stable hash so distinct ids sharing a prefix never
+  // share a private mirror/asset directory (80-char prefix collision).
+  let h = 5381;
+  for (let i = 0; i < userId.length; i++) {
+    h = ((h << 5) + h + userId.charCodeAt(i)) | 0;
+  }
+  const suffix = (h >>> 0).toString(16).padStart(8, '0');
+  return `${base.slice(0, 48)}-${suffix}`;
 }

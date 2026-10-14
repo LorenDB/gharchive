@@ -20,11 +20,19 @@ export default async function LoginPage({
     redirect('/');
   }
 
-  const next =
-    searchParams.next && searchParams.next.startsWith('/')
-      ? searchParams.next
-      : '/';
-  const error = searchParams.error;
+  const next = (() => {
+    const n = searchParams.next;
+    if (!n || typeof n !== 'string') return '/';
+    if (!n.startsWith('/') || n.startsWith('//') || n.startsWith('/\\')) return '/';
+    if (/[\0\t\r\n\\]/.test(n)) return '/';
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(n.slice(1))) return '/';
+    if (n.length > 512) return '/';
+    return n;
+  })();
+  const error =
+    typeof searchParams.error === 'string'
+      ? searchParams.error.replace(/[\r\n]/g, ' ').slice(0, 200)
+      : undefined;
   const loginHref = `/api/auth/login?next=${encodeURIComponent(next)}`;
 
   return (

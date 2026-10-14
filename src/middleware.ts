@@ -1,21 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-/** Edge-safe random base64 nonce (Web Crypto; Node `crypto` is unavailable on Edge). */
-function cspNonce(): string {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]!);
-  }
-  return btoa(binary);
-}
-
-export function middleware(request: NextRequest) {
-  const nonce = cspNonce();
+export function middleware(_request: NextRequest) {
+  // CSP without nonce/strict-dynamic: the nonce was generated but never wired
+  // into Next's inline scripts, so strict-dynamic made the policy decorative.
+  // Keep a tight static policy; raw-repo HTML/SVG is already sandboxed in the
+  // /raw route (nosniff + DENY + sandbox + forced attachment).
   const csp = [
     `default-src 'self'`,
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${process.env.NODE_ENV === 'development' ? " 'unsafe-eval'" : ''}`,
+    `script-src 'self'${process.env.NODE_ENV === 'development' ? " 'unsafe-eval'" : ''}`,
     `object-src 'none'`,
     `style-src 'self' 'unsafe-inline'`,
     `img-src 'self' data: blob: https:`,
@@ -24,12 +16,10 @@ export function middleware(request: NextRequest) {
     `frame-ancestors 'none'`,
     `base-uri 'self'`,
     `form-action 'self'`,
+    `upgrade-insecure-requests`,
   ].join('; ');
 
-  const requestHeaders = new Headers(request.headers);
-  requestHeaders.set('x-nonce', nonce);
-
-  const response = NextResponse.next({ request: { headers: requestHeaders } });
+  const response = NextResponse.next();
   response.headers.set('Content-Security-Policy', csp);
   return response;
 }

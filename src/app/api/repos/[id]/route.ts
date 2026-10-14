@@ -8,7 +8,8 @@ import {
   updateRepo,
   getRepoById,
 } from '@/lib/db';
-import { deleteMirror, mirrorStat } from '@/lib/git';
+import { deleteMirror, mirrorStat, assertMirrorPathInside } from '@/lib/git';
+import { getReleasesRoot, isPathInside } from '@/lib/safe-url';
 import { withApiUser, checkRateLimit, checkCsrf } from '@/lib/api-auth';
 
 export async function GET(
@@ -172,7 +173,7 @@ export async function PATCH(
       }
     }
 
-    updateRepo(id, updates);
+    const pruned_assets = updateRepo(id, updates);
     const updated = getRepoById(id)!;
     const { mirror_path: _mp, ...safeRepo } = updated;
 
@@ -181,6 +182,7 @@ export async function PATCH(
         ...safeRepo,
         lists: getRepoLists(updated.id),
       },
+      pruned_assets,
     });
   });
 }
@@ -206,10 +208,24 @@ export async function DELETE(
 
     if (result.archiveDeleted) {
       if (result.mirrorPath) {
-        await deleteMirror(result.mirrorPath);
+        try {
+          assertMirrorPathInside(result.mirrorPath);
+          await deleteMirror(result.mirrorPath);
+        } catch (err) {
+          console.error('[repos] refused mirror delete outside root:', err);
+        }
       }
+      const releasesRoot = getReleasesRoot();
       for (const assetPath of result.assetPaths) {
         try {
+          // Confine deletes to the releases tree (DB paths are server-set,
+          // but a tampered db.json must not delete arbitrary files).
+          if (!isPathInside(releasesRoot, assetPath)) {
+            console.error(`[repos] refused asset delete outside root: ${assetPath.slice(0, 120)}`);
+            continue;
+          }
+          const st = fs.lstatSync(assetPath);
+          if (st.isSymbolicLink() || st.isDirectory()) continue;
           if (fs.existsSync(assetPath)) fs.unlinkSync(assetPath);
         } catch {
           // best-effort asset cleanup

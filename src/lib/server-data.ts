@@ -8,7 +8,7 @@ import {
   getLists,
   getListCounts,
   getRepoLists,
-  getSettings,
+  getSettingsPublic,
   getGithubAccountPublic,
   listUsersWithUsage,
   getUserStorageDetail,
@@ -131,7 +131,7 @@ export function getDashboardData(listId: number | null = null): {
 }
 
 export async function getSettingsPageData(user: SessionUser): Promise<{
-  settings: Settings;
+  settings: ReturnType<typeof getSettingsPublic>;
   defaults: Settings;
   interval_options: number[];
   scheduler: ReturnType<typeof getSchedulerStatus>;
@@ -148,7 +148,7 @@ export async function getSettingsPageData(user: SessionUser): Promise<{
   /** Current user's storage usage + largest-repo breakdown. */
   storage: UserStorageDetail;
 }> {
-  const settings = getSettings();
+  const settings = getSettingsPublic();
   const admin = isAdmin(user);
   let disk = null;
   try {

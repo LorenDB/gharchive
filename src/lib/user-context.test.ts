@@ -97,9 +97,15 @@ describe('safeUserPathSegment', () => {
     expect(safeUserPathSegment('...')).toBe('user');
   });
 
-  it('truncates to 80 characters', () => {
+  it('truncates long ids with a hash suffix to avoid prefix collisions', () => {
     const long = 'a'.repeat(100);
-    expect(safeUserPathSegment(long).length).toBe(80);
+    const seg = safeUserPathSegment(long);
+    expect(seg.length).toBeLessThanOrEqual(57);
+    expect(seg).toMatch(/^a{48}-[0-9a-f]{8}$/);
+    // Distinct long ids sharing a prefix must not collide
+    expect(safeUserPathSegment(`a`.repeat(100))).not.toBe(
+      safeUserPathSegment(`a`.repeat(99) + 'b')
+    );
   });
 });
 

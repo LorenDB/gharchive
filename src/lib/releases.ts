@@ -214,7 +214,14 @@ export async function fetchReleases(
 }
 
 async function fetchGitHubReleases(repoPath: string): Promise<ReleaseData[]> {
-  const url = `https://api.github.com/repos/${repoPath}/releases?per_page=100`;
+  // Encode each path segment so owner/name charset can't inject query/fragment
+  // into api.github.com (owner names come from upstream API responses).
+  const encodedPath = repoPath
+    .split('/')
+    .filter(Boolean)
+    .map((s) => encodeURIComponent(s))
+    .join('/');
+  const url = `https://api.github.com/repos/${encodedPath}/releases?per_page=100`;
   // Lazy import to avoid circular deps at module init
   const { getGithubToken } = await import('@/lib/db');
   const token = getGithubToken();
@@ -227,7 +234,13 @@ async function fetchGitHubReleases(repoPath: string): Promise<ReleaseData[]> {
   const res = await fetch(url, {
     headers,
     signal: AbortSignal.timeout(30_000),
+    redirect: 'manual',
   });
+  // api.github.com does not redirect release listings; fail closed on 3xx
+  // rather than following to an attacker-influenced target.
+  if (res.status >= 300 && res.status < 400) {
+    throw new Error(`GitHub API unexpected redirect: ${res.status}`);
+  }
   if (!res.ok) throw new Error(`GitHub API error: ${res.status}`);
 
   const releases: any[] = await res.json();
@@ -255,7 +268,11 @@ async function fetchGitLabReleases(projectPath: string): Promise<ReleaseData[]> 
   const res = await fetch(url, {
     headers,
     signal: AbortSignal.timeout(30_000),
+    redirect: 'manual',
   });
+  if (res.status >= 300 && res.status < 400) {
+    throw new Error(`GitLab API unexpected redirect: ${res.status}`);
+  }
   if (!res.ok) throw new Error(`GitLab API error: ${res.status}`);
 
   const releases: any[] = await res.json();
@@ -299,6 +316,12 @@ export type DownloadAssetOptions = {
    * Defaults to the basename of destPath.
    */
   assetName?: string;
+  /**
+   * Hard cap for downloaded bytes (actual wire bytes, not upstream `size`
+   * which is attacker-controlled). Defaults to max_asset_size_mb setting
+   * (0 = 100MB fallback) — callers may pass a smaller per-repo cap.
+   */
+  maxBytes?: number;
 };
 
 /** Result of a successful or failed release-asset download. */
@@ -334,6 +357,18 @@ export async function downloadReleaseAsset(
       console.warn(`[releases] refusing untrusted asset URL: ${url.slice(0, 120)}`);
       notifyUntrustedHost(url, options.onUntrustedHost);
       return { ok: false };
+    }
+
+    // Bound wire bytes by actual setting, not upstream `size` (spoofable).
+    let capBytes = options.maxBytes;
+    if (capBytes == null) {
+      try {
+        const { getSettings } = await import('@/lib/db');
+        const mb = getSettings().max_asset_size_mb;
+        capBytes = mb > 0 ? mb * 1024 * 1024 : 100 * 1024 * 1024;
+      } catch {
+        capBytes = 100 * 1024 * 1024;
+      }
     }
 
     const memCheck = hasEnoughMemory(64);
@@ -379,7 +414,22 @@ export async function downloadReleaseAsset(
     }
     if (!res || !res.ok) return { ok: false };
 
+    // Pre-check Content-Length (when the server sends one) before buffering.
+    const contentLength = res.headers.get('content-length');
+    if (contentLength) {
+      const len = Number(contentLength);
+      if (Number.isFinite(len) && len > capBytes) {
+        console.warn(`[releases] asset too large (Content-Length ${len}): ${url.slice(0, 120)}`);
+        return { ok: false };
+      }
+    }
+
     const raw = Buffer.from(await res.arrayBuffer());
+    // Enforce cap on actual wire bytes (Content-Length may be absent/lying).
+    if (raw.length > capBytes) {
+      console.warn(`[releases] asset too large (${raw.length} bytes): ${url.slice(0, 120)}`);
+      return { ok: false };
+    }
     let outPath = destPath;
     let storageCompressed = false;
     let toWrite: Buffer = raw;

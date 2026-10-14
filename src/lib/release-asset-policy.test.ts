@@ -214,13 +214,14 @@ describe('pruneReleaseAssets', () => {
       // Metadata remains for all three
       expect(getArchiveReleasesSorted(archive.id)).toHaveLength(3);
 
-      // Per-repo override to none drops remaining assets
-      updateRepo(repo.id, { release_asset_mode: 'none' });
+      // Per-repo override to none drops remaining assets immediately
+      const autoPruned = updateRepo(repo.id, { release_asset_mode: 'none' });
       expect(getArchiveReleaseAssetPolicy(archive.id).mode).toBe('none');
-      const dropped2 = pruneReleaseAssets(archive.id);
-      expect(dropped2).toBe(2);
+      expect(autoPruned).toBe(2);
       expect(fs.existsSync(assetPaths[1]!)).toBe(false);
       expect(fs.existsSync(assetPaths[2]!)).toBe(false);
+      // Already flushed — explicit prune is a no-op
+      expect(pruneReleaseAssets(archive.id)).toBe(0);
     });
   });
 
@@ -236,10 +237,8 @@ describe('pruneReleaseAssets', () => {
         last_synced_at: null,
         is_private: false,
       });
-      const alice = linkUserToArchive(archive.id, {
-        owner_id: 'alice',
-      });
-      linkUserToArchive(archive.id, { owner_id: 'bob' });
+      const alice = runAsUser('alice', () => linkUserToArchive(archive.id));
+      runAsUser('bob', () => linkUserToArchive(archive.id));
 
       // Alice: last 1; Bob: last 3 → prune keeps 3
       runAsUser('alice', () => {
@@ -304,6 +303,142 @@ describe('pruneReleaseAssets', () => {
       expect(getArchiveReleaseAssetPolicy(archive.id).mode).toBe('all');
       expect(pruneReleaseAssets(archive.id)).toBe(0);
       expect(fs.existsSync(fp)).toBe(true);
+    });
+  });
+
+  it('updateRepo tightening keep_last flushes immediately', () => {
+    runAsUser(AUTOLOGIN_USER_ID, () => {
+      warmDb();
+      const archive = createArchive({
+        platform: 'github',
+        owner: 'acme',
+        name: 'tighten',
+        clone_url: 'https://github.com/acme/tighten.git',
+        mirror_path: path.join(tempDir, 'mirrors', 'github', 'acme', 'tighten.git'),
+        last_synced_at: null,
+        is_private: false,
+      });
+      const repo = linkUserToArchive(archive.id);
+      updateRepo(repo.id, { release_asset_mode: 'last_n', release_asset_keep_last: 3 });
+
+      for (let i = 1; i <= 3; i++) {
+        const rel = addRelease({
+          archive_id: archive.id,
+          tag_name: `v${i}`,
+          name: `v${i}`,
+          body: null,
+          published_at: `2024-0${i}-01T00:00:00Z`,
+        });
+        const fp = path.join(tempDir, 'tighten-assets', `v${i}.bin`);
+        fs.mkdirSync(path.dirname(fp), { recursive: true });
+        fs.writeFileSync(fp, 'x');
+        addReleaseAsset({
+          release_id: rel.id,
+          name: `v${i}.bin`,
+          content_type: null,
+          size: 1,
+          file_path: fp,
+          download_url: null,
+        });
+      }
+
+      // Tighten 3 → 1 flushes the two older assets without waiting for sync
+      const pruned = updateRepo(repo.id, { release_asset_keep_last: 1 });
+      expect(pruned).toBe(2);
+      expect(fs.existsSync(path.join(tempDir, 'tighten-assets', 'v1.bin'))).toBe(false);
+      expect(fs.existsSync(path.join(tempDir, 'tighten-assets', 'v2.bin'))).toBe(false);
+      expect(fs.existsSync(path.join(tempDir, 'tighten-assets', 'v3.bin'))).toBe(true);
+    });
+  });
+
+  it('pruneUserArchives flushes inherited repos after global tightening', async () => {
+    const { pruneUserArchives } = await import('@/lib/db');
+    runAsUser(AUTOLOGIN_USER_ID, () => {
+      warmDb();
+      const archive = createArchive({
+        platform: 'github',
+        owner: 'acme',
+        name: 'inherited',
+        clone_url: 'https://github.com/acme/inherited.git',
+        mirror_path: path.join(tempDir, 'mirrors', 'github', 'acme', 'inherited.git'),
+        last_synced_at: null,
+        is_private: false,
+      });
+      linkUserToArchive(archive.id);
+      updateSettings({ release_asset_mode: 'all' });
+
+      for (let i = 1; i <= 2; i++) {
+        const rel = addRelease({
+          archive_id: archive.id,
+          tag_name: `v${i}`,
+          name: `v${i}`,
+          body: null,
+          published_at: `2024-0${i}-01T00:00:00Z`,
+        });
+        const fp = path.join(tempDir, 'inherited-assets', `v${i}.bin`);
+        fs.mkdirSync(path.dirname(fp), { recursive: true });
+        fs.writeFileSync(fp, 'x');
+        addReleaseAsset({
+          release_id: rel.id,
+          name: `v${i}.bin`,
+          content_type: null,
+          size: 1,
+          file_path: fp,
+          download_url: null,
+        });
+      }
+
+      // Global all → none, then flush member archives
+      updateSettings({ release_asset_mode: 'none' });
+      const pruned = pruneUserArchives(AUTOLOGIN_USER_ID);
+      expect(pruned).toBe(2);
+      expect(fs.existsSync(path.join(tempDir, 'inherited-assets', 'v1.bin'))).toBe(false);
+      expect(fs.existsSync(path.join(tempDir, 'inherited-assets', 'v2.bin'))).toBe(false);
+    });
+  });
+
+  it('pruneAllArchives sweeps every archive (startup autoprune)', async () => {
+    const { pruneAllArchives } = await import('@/lib/db');
+    runAsUser(AUTOLOGIN_USER_ID, () => {
+      warmDb();
+      updateSettings({ release_asset_mode: 'none' });
+      for (const name of ['startup-a', 'startup-b']) {
+        const archive = createArchive({
+          platform: 'github',
+          owner: 'acme',
+          name,
+          clone_url: `https://github.com/acme/${name}.git`,
+          mirror_path: path.join(tempDir, 'mirrors', 'github', 'acme', `${name}.git`),
+          last_synced_at: null,
+          is_private: false,
+        });
+        linkUserToArchive(archive.id);
+        const rel = addRelease({
+          archive_id: archive.id,
+          tag_name: 'v1',
+          name: 'v1',
+          body: null,
+          published_at: '2024-01-01T00:00:00Z',
+        });
+        const fp = path.join(tempDir, `${name}-assets`, 'v1.bin');
+        fs.mkdirSync(path.dirname(fp), { recursive: true });
+        fs.writeFileSync(fp, 'x');
+        addReleaseAsset({
+          release_id: rel.id,
+          name: 'v1.bin',
+          content_type: null,
+          size: 1,
+          file_path: fp,
+          download_url: null,
+        });
+      }
+
+      const pruned = pruneAllArchives();
+      expect(pruned).toBe(2);
+      expect(fs.existsSync(path.join(tempDir, 'startup-a-assets', 'v1.bin'))).toBe(false);
+      expect(fs.existsSync(path.join(tempDir, 'startup-b-assets', 'v1.bin'))).toBe(false);
+      // Second sweep is a no-op
+      expect(pruneAllArchives()).toBe(0);
     });
   });
 });

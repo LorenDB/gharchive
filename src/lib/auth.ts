@@ -47,8 +47,13 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
   // Next 14: cookies() is sync; still wrapped async for session crypto.
   const jar = cookies();
   const token = jar.get(SESSION_COOKIE)?.value;
-  const session = await readSessionToken(token);
-  return session?.user ?? null;
+  try {
+    const session = await readSessionToken(token);
+    return session?.user ?? null;
+  } catch {
+    // Misconfigured SESSION_SECRET or corrupt cookie must not 500 — treat as logged out.
+    return null;
+  }
 }
 
 /** Stable user id for the current actor (or null if SSO and logged out). */

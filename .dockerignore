@@ -4,3 +4,8 @@ data
 .git
 *.md
 .gitignore
+.env
+.env.*
+!.env.example
+data/db.json
+data/*.bak

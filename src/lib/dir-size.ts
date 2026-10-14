@@ -14,27 +14,37 @@ type Entry = { bytes: number; at: number };
 const cache = new Map<string, Entry>();
 const inflight = new Set<string>();
 
-function walkSync(dirPath: string): number {
+function walkSync(dirPath: string, depth = 0): number {
+  // Bound depth + skip symlinks: a malicious mirror with a symlink loop must
+  // not wedge the event loop on cold-cache walks.
+  if (depth > 25) return 0;
   let total = 0;
   const entries = fs.readdirSync(dirPath, { withFileTypes: true });
   for (const entry of entries) {
     const full = path.join(dirPath, entry.name);
-    if (entry.isDirectory()) total += walkSync(full);
-    else total += fs.statSync(full).size;
+    try {
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) total += walkSync(full, depth + 1);
+      else total += fs.lstatSync(full).size;
+    } catch {
+      // unreadable / vanished mid-walk
+    }
   }
   return total;
 }
 
-async function walkAsync(dirPath: string): Promise<number> {
+async function walkAsync(dirPath: string, depth = 0): Promise<number> {
+  if (depth > 25) return 0;
   let total = 0;
   const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
   for (const entry of entries) {
     const full = path.join(dirPath, entry.name);
+    if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory()) {
-      total += await walkAsync(full);
+      total += await walkAsync(full, depth + 1);
     } else {
       try {
-        total += (await fs.promises.stat(full)).size;
+        total += (await fs.promises.lstat(full)).size;
       } catch {
         // file vanished mid-walk
       }

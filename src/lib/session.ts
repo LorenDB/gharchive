@@ -56,15 +56,33 @@ function isProduction(): boolean {
 
 export function hasSecureSessionSecret(): boolean {
   const secret = process.env.SESSION_SECRET?.trim();
+  // Require at least 128 bits of entropy (32 hex chars / 32+ ASCII chars).
+  // 16-char minimum is kept for backwards compat but warned about — see
+  // requireSecureSecret(). New deployments should use `openssl rand -base64 32`.
   return Boolean(secret && secret.length >= 16);
+}
+
+/** True when the secret meets the recommended strength (>= 32 chars). */
+export function hasStrongSessionSecret(): boolean {
+  const secret = process.env.SESSION_SECRET?.trim();
+  return Boolean(secret && secret.length >= 32);
 }
 
 function requireSecureSecret(): string {
   const secret = getSessionSecret();
-  if (!hasSecureSessionSecret() && isProduction()) {
+  const needsSecure =
+    isProduction() ||
+    Boolean(process.env.OIDC_ISSUER?.trim() && process.env.OIDC_CLIENT_ID?.trim());
+  if (!hasSecureSessionSecret() && needsSecure) {
     throw new Error(
       'SESSION_SECRET is not set or too short (min 16 characters). ' +
-        'The dev secret is never accepted in production.'
+        'The dev secret is never accepted in production or when OIDC is enabled.'
+    );
+  }
+  if (!hasStrongSessionSecret() && needsSecure) {
+    console.warn(
+      '[session] SESSION_SECRET is <32 chars; generate a longer secret ' +
+        '(`openssl rand -base64 32`) for 128-bit security.'
     );
   }
   return secret;
@@ -153,7 +171,14 @@ export async function unsealPayload<T>(
   secret?: string
 ): Promise<T | null> {
   if (!token) return null;
-  const key = secret ?? requireSecureSecret();
+  let key: string;
+  try {
+    key = secret ?? requireSecureSecret();
+  } catch {
+    // Fail closed without throwing (callers treat null as unauthenticated
+    // instead of 500ing when SESSION_SECRET is misconfigured).
+    return null;
+  }
   const parts = token.split('.');
   if (parts.length !== 2) return null;
   const [payloadB64, sigB64] = parts;
@@ -168,9 +193,12 @@ export async function unsealPayload<T>(
 }
 
 export async function createSessionToken(user: SessionUser): Promise<string> {
-  if (!hasSecureSessionSecret() && process.env.NODE_ENV === 'production') {
+  const needsSecure =
+    process.env.NODE_ENV === 'production' ||
+    Boolean(process.env.OIDC_ISSUER?.trim() && process.env.OIDC_CLIENT_ID?.trim());
+  if (!hasSecureSessionSecret() && needsSecure) {
     throw new Error(
-      'SESSION_SECRET is required when OIDC is enabled (min 16 characters)'
+      'SESSION_SECRET is required when OIDC is enabled or in production (min 16 characters)'
     );
   }
   const now = Math.floor(Date.now() / 1000);

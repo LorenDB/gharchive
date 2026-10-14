@@ -46,6 +46,9 @@ interface Settings {
   wayback_readme_urls_enabled: boolean;
   wayback_access_key: string;
   wayback_secret_key: string;
+  has_wayback_access_key?: boolean;
+  has_wayback_secret_key?: boolean;
+  has_apprise_urls?: boolean;
 }
 
 interface SchedulerStatus {
@@ -1364,7 +1367,11 @@ export default function SettingsClient({
                     onChange={(e) =>
                       setDraft({ ...draft, wayback_access_key: e.target.value })
                     }
-                    placeholder="S3 access key"
+                    placeholder={
+                      (settings as Settings)?.has_wayback_access_key
+                        ? '(configured — leave blank to keep, __CLEAR__ to clear)'
+                        : 'S3 access key'
+                    }
                     autoComplete="off"
                   />
                 </div>
@@ -1380,7 +1387,11 @@ export default function SettingsClient({
                     onChange={(e) =>
                       setDraft({ ...draft, wayback_secret_key: e.target.value })
                     }
-                    placeholder="S3 secret key"
+                    placeholder={
+                      (settings as Settings)?.has_wayback_secret_key
+                        ? '(configured — leave blank to keep, __CLEAR__ to clear)'
+                        : 'S3 secret key'
+                    }
                     autoComplete="off"
                   />
                 </div>

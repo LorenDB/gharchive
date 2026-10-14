@@ -1,12 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
   getSettings,
+  getEffectiveGlobalMaxAssetSize,
   updateSettings,
+  pruneUserArchives,
   DEFAULT_SETTINGS,
   isReleaseAssetMode,
   type Settings,
   type ReleaseAssetMode,
 } from '@/lib/db';
+import { isUnsafeOutboundHostname } from '@/lib/safe-url';
 import {
   getSchedulerStatus,
   runScheduledSync,
@@ -69,14 +72,41 @@ function parseAppriseUrls(value: unknown): string[] | { error: string } {
     if (u.length > 2000) {
       return { error: 'apprise_urls: URL too long' };
     }
-    // Apprise URLs are scheme://... — allow anything with ://
+    // Apprise URLs are scheme://... — allow anything with :// except
+    // dangerous local schemes (these URLs are POSTed to the Apprise server,
+    // which would interpret file:// / localhost targets).
     if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u)) {
       return {
-        error: `apprise_urls: invalid URL (expected scheme://…): ${u.slice(0, 60)}`,
+        error: 'apprise_urls: invalid URL (expected scheme://…)',
       };
+    }
+    const scheme = u.split('://')[0]!.toLowerCase();
+    if (['file', 'gopher', 'dict', 'ldap', 'ftp'].includes(scheme)) {
+      return { error: `apprise_urls: scheme not allowed: ${scheme}` };
     }
   }
   return urls;
+}
+
+function rejectAdminOnly(field: string) {
+  return { error: `${field} requires admin access` };
+}
+
+function checkOutboundHttpUrl(u: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(u);
+  } catch {
+    return 'must be a valid URL';
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return 'must start with http:// or https://';
+  }
+  if (parsed.username || parsed.password) return 'must not contain credentials';
+  if (isUnsafeOutboundHostname(parsed.hostname)) {
+    return 'host not allowed (loopback / metadata)';
+  }
+  return null;
 }
 
 export async function GET() {
@@ -160,14 +190,16 @@ export async function PUT(req: NextRequest) {
           );
         }
         let val = Math.round(n);
-        const settings = getSettings();
-        if (settings.global_max_asset_size_mb > 0 && val > settings.global_max_asset_size_mb) {
-          val = settings.global_max_asset_size_mb;
-        }
+        // Enforce the effective global cap (admin-set, across all users),
+        // not just the caller's own copy.
+        const cap = getEffectiveGlobalMaxAssetSize();
+        if (cap > 0 && val > cap) val = cap;
         patch.max_asset_size_mb = val;
       }
 
-      if (body.concurrent_syncs !== undefined && userIsAdmin) {
+      if (body.concurrent_syncs !== undefined) {
+        if (!userIsAdmin)
+          return NextResponse.json(rejectAdminOnly('concurrent_syncs'), { status: 403 });
         const n = Number(body.concurrent_syncs);
         if (!Number.isFinite(n) || n < 1 || n > 8) {
           return NextResponse.json(
@@ -178,7 +210,9 @@ export async function PUT(req: NextRequest) {
         patch.concurrent_syncs = Math.round(n);
       }
 
-      if (body.global_max_asset_size_mb !== undefined && userIsAdmin) {
+      if (body.global_max_asset_size_mb !== undefined) {
+        if (!userIsAdmin)
+          return NextResponse.json(rejectAdminOnly('global_max_asset_size_mb'), { status: 403 });
         const n = Number(body.global_max_asset_size_mb);
         if (!Number.isFinite(n) || n < 0 || n > 100_000) {
           return NextResponse.json(
@@ -190,7 +224,9 @@ export async function PUT(req: NextRequest) {
       }
 
       // Storage compression for release assets (admin only)
-      if (typeof body.compress_release_assets === 'boolean' && userIsAdmin) {
+      if (typeof body.compress_release_assets === 'boolean') {
+        if (!userIsAdmin)
+          return NextResponse.json(rejectAdminOnly('compress_release_assets'), { status: 403 });
         patch.compress_release_assets = body.compress_release_assets;
       }
 
@@ -215,9 +251,17 @@ export async function PUT(req: NextRequest) {
             { status: 400 }
           );
         }
+        if (body.auto_import_stars_list_ids.length > 100) {
+          return NextResponse.json(
+            { error: 'auto_import_stars_list_ids: at most 100 ids' },
+            { status: 400 }
+          );
+        }
         patch.auto_import_stars_list_ids = body.auto_import_stars_list_ids
-          .map(String)
-          .filter(Boolean);
+          .map((v: unknown) => String(v).slice(0, 128))
+          .map((s: string) => s.trim())
+          .filter(Boolean)
+          .slice(0, 100);
       }
 
       // Enabling auto-import implies scanning
@@ -240,11 +284,15 @@ export async function PUT(req: NextRequest) {
       }
 
       // Memory-aware settings (admin only)
-      if (typeof body.memory_aware_enabled === 'boolean' && userIsAdmin) {
+      if (typeof body.memory_aware_enabled === 'boolean') {
+        if (!userIsAdmin)
+          return NextResponse.json(rejectAdminOnly('memory_aware_enabled'), { status: 403 });
         patch.memory_aware_enabled = body.memory_aware_enabled;
       }
 
-      if (body.min_free_memory_mb !== undefined && userIsAdmin) {
+      if (body.min_free_memory_mb !== undefined) {
+        if (!userIsAdmin)
+          return NextResponse.json(rejectAdminOnly('min_free_memory_mb'), { status: 403 });
         const n = Number(body.min_free_memory_mb);
         if (!Number.isFinite(n) || n < 64 || n > 65536) {
           return NextResponse.json(
@@ -255,7 +303,9 @@ export async function PUT(req: NextRequest) {
         patch.min_free_memory_mb = Math.round(n);
       }
 
-      if (body.max_memory_usage_ratio !== undefined && userIsAdmin) {
+      if (body.max_memory_usage_ratio !== undefined) {
+        if (!userIsAdmin)
+          return NextResponse.json(rejectAdminOnly('max_memory_usage_ratio'), { status: 403 });
         const n = Number(body.max_memory_usage_ratio);
         if (!Number.isFinite(n) || n < 0.1 || n > 1) {
           return NextResponse.json(
@@ -270,9 +320,9 @@ export async function PUT(req: NextRequest) {
       // Archive event alert booleans are available to everyone
       for (const key of ALERT_BOOL_KEYS) {
         if (typeof body[key] === 'boolean') {
-          // System event alerts are admin-only; silently skip for non-admins
+          // System event alerts are admin-only; reject for non-admins (auditable)
           if ((key === 'alert_storage_low' || key === 'alert_memory_low') && !userIsAdmin) {
-            continue;
+            return NextResponse.json(rejectAdminOnly(key), { status: 403 });
           }
           patch[key] = body[key];
         }
@@ -280,7 +330,9 @@ export async function PUT(req: NextRequest) {
 
       // apprise_api_url is admin-only: it controls where the server POSTs
       // (SSRF surface). Non-admins use APPRISE_API_URL env or admin-set base.
-      if (body.apprise_api_url !== undefined && userIsAdmin) {
+      if (body.apprise_api_url !== undefined) {
+        if (!userIsAdmin)
+          return NextResponse.json(rejectAdminOnly('apprise_api_url'), { status: 403 });
         if (typeof body.apprise_api_url !== 'string') {
           return NextResponse.json(
             { error: 'apprise_api_url must be a string' },
@@ -288,11 +340,20 @@ export async function PUT(req: NextRequest) {
           );
         }
         const u = body.apprise_api_url.trim();
-        if (u && !/^https?:\/\//i.test(u)) {
-          return NextResponse.json(
-            { error: 'apprise_api_url must start with http:// or https://' },
-            { status: 400 }
-          );
+        if (u) {
+          if (!/^https?:\/\//i.test(u)) {
+            return NextResponse.json(
+              { error: 'apprise_api_url must start with http:// or https://' },
+              { status: 400 }
+            );
+          }
+          const outboundErr = checkOutboundHttpUrl(u);
+          if (outboundErr) {
+            return NextResponse.json(
+              { error: `apprise_api_url ${outboundErr}` },
+              { status: 400 }
+            );
+          }
         }
         if (u.length > 500) {
           return NextResponse.json(
@@ -305,7 +366,9 @@ export async function PUT(req: NextRequest) {
 
       // apprise_endpoint_url is admin-only: overrides the default /notify path
       // construction and POSTs directly to this URL (SSRF surface).
-      if (body.apprise_endpoint_url !== undefined && userIsAdmin) {
+      if (body.apprise_endpoint_url !== undefined) {
+        if (!userIsAdmin)
+          return NextResponse.json(rejectAdminOnly('apprise_endpoint_url'), { status: 403 });
         if (typeof body.apprise_endpoint_url !== 'string') {
           return NextResponse.json(
             { error: 'apprise_endpoint_url must be a string' },
@@ -313,11 +376,20 @@ export async function PUT(req: NextRequest) {
           );
         }
         const u = body.apprise_endpoint_url.trim();
-        if (u && !/^https?:\/\//i.test(u)) {
-          return NextResponse.json(
-            { error: 'apprise_endpoint_url must start with http:// or https://' },
-            { status: 400 }
-          );
+        if (u) {
+          if (!/^https?:\/\//i.test(u)) {
+            return NextResponse.json(
+              { error: 'apprise_endpoint_url must start with http:// or https://' },
+              { status: 400 }
+            );
+          }
+          const outboundErr = checkOutboundHttpUrl(u);
+          if (outboundErr) {
+            return NextResponse.json(
+              { error: `apprise_endpoint_url ${outboundErr}` },
+              { status: 400 }
+            );
+          }
         }
         if (u.length > 500) {
           return NextResponse.json(
@@ -356,7 +428,9 @@ export async function PUT(req: NextRequest) {
         patch.apprise_urls = urls;
       }
 
-      if (body.storage_alert_threshold_percent !== undefined && userIsAdmin) {
+      if (body.storage_alert_threshold_percent !== undefined) {
+        if (!userIsAdmin)
+          return NextResponse.json(rejectAdminOnly('storage_alert_threshold_percent'), { status: 403 });
         const n = Number(body.storage_alert_threshold_percent);
         if (!Number.isFinite(n) || n < 50 || n > 100) {
           return NextResponse.json(
@@ -370,7 +444,9 @@ export async function PUT(req: NextRequest) {
         patch.storage_alert_threshold_percent = Math.round(n);
       }
 
-      if (body.storage_alert_min_free_mb !== undefined && userIsAdmin) {
+      if (body.storage_alert_min_free_mb !== undefined) {
+        if (!userIsAdmin)
+          return NextResponse.json(rejectAdminOnly('storage_alert_min_free_mb'), { status: 403 });
         const n = Number(body.storage_alert_min_free_mb);
         if (!Number.isFinite(n) || n < 0 || n > 1024 * 1024) {
           return NextResponse.json(
@@ -381,7 +457,9 @@ export async function PUT(req: NextRequest) {
         patch.storage_alert_min_free_mb = Math.round(n);
       }
 
-      // Wayback Machine — README absolute URL archival (per-user)
+      // Wayback Machine — README absolute URL archival (per-user).
+      // Secrets use placeholder-update: empty string = keep existing,
+      // "__CLEAR__" = clear, non-empty = replace. GET never returns raw values.
       if (typeof body.wayback_readme_urls_enabled === 'boolean') {
         patch.wayback_readme_urls_enabled = body.wayback_readme_urls_enabled;
       }
@@ -394,23 +472,28 @@ export async function PUT(req: NextRequest) {
           );
         }
         const k = body.wayback_access_key.trim();
-        if (k.length > 256) {
-          return NextResponse.json(
-            { error: 'wayback_access_key too long' },
-            { status: 400 }
-          );
+        if (k === '' || k === '__CLEAR__') {
+          if (k === '__CLEAR__') patch.wayback_access_key = '';
+          // empty = keep existing (do not overwrite with blank)
+        } else {
+          if (k.length > 256) {
+            return NextResponse.json(
+              { error: 'wayback_access_key too long' },
+              { status: 400 }
+            );
+          }
+          // Allow alphanumeric + common S3 key chars
+          if (!/^[A-Za-z0-9_-]+$/.test(k)) {
+            return NextResponse.json(
+              {
+                error:
+                  'wayback_access_key must be alphanumeric (plus _ -)',
+              },
+              { status: 400 }
+            );
+          }
+          patch.wayback_access_key = k;
         }
-        // Allow alphanumeric + common S3 key chars
-        if (k && !/^[A-Za-z0-9_-]+$/.test(k)) {
-          return NextResponse.json(
-            {
-              error:
-                'wayback_access_key must be alphanumeric (plus _ -)',
-            },
-            { status: 400 }
-          );
-        }
-        patch.wayback_access_key = k;
       }
 
       if (body.wayback_secret_key !== undefined) {
@@ -421,27 +504,43 @@ export async function PUT(req: NextRequest) {
           );
         }
         const k = body.wayback_secret_key.trim();
-        if (k.length > 256) {
-          return NextResponse.json(
-            { error: 'wayback_secret_key too long' },
-            { status: 400 }
-          );
+        if (k === '' || k === '__CLEAR__') {
+          if (k === '__CLEAR__') patch.wayback_secret_key = '';
+        } else {
+          if (k.length > 256) {
+            return NextResponse.json(
+              { error: 'wayback_secret_key too long' },
+              { status: 400 }
+            );
+          }
+          if (!/^[A-Za-z0-9_-]+$/.test(k)) {
+            return NextResponse.json(
+              {
+                error:
+                  'wayback_secret_key must be alphanumeric (plus _ -)',
+              },
+              { status: 400 }
+            );
+          }
+          patch.wayback_secret_key = k;
         }
-        if (k && !/^[A-Za-z0-9_-]+$/.test(k)) {
-          return NextResponse.json(
-            {
-              error:
-                'wayback_secret_key must be alphanumeric (plus _ -)',
-            },
-            { status: 400 }
-          );
-        }
-        patch.wayback_secret_key = k;
       }
 
       const settings = updateSettings(patch);
+      // Global retention tightening affects every repo inheriting the
+      // default — flush assets outside the new effective policy now
+      // instead of waiting for the next sync.
+      let pruned_assets = 0;
+      if (
+        patch.release_asset_mode !== undefined ||
+        patch.release_asset_keep_last !== undefined ||
+        patch.download_release_assets !== undefined
+      ) {
+        pruned_assets = pruneUserArchives(user.id);
+      }
       return NextResponse.json({
         settings,
+        pruned_assets,
         scheduler: getSchedulerStatus(),
         alerts: {
           configured: isAlertsConfigured(settings),

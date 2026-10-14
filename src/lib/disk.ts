@@ -25,20 +25,23 @@ export interface DiskInfo {
 export async function getDiskInfo(targetPath = DATA_DIR): Promise<DiskInfo> {
   const resolved = path.resolve(targetPath);
 
-  // Ensure the directory exists so statfs/df have something to probe
+  // Do not mkdir here — a read path must not mutate the filesystem (and must
+  // not create attacker-influenced paths). Probe parent when missing.
+  let probe = resolved;
   try {
     if (!fs.existsSync(resolved)) {
-      fs.mkdirSync(resolved, { recursive: true });
+      const parent = path.dirname(resolved);
+      if (fs.existsSync(parent)) probe = parent;
     }
   } catch {
-    // ignore — probe may still work on parent
+    // ignore — probe may still work
   }
 
-  const fromStatfs = tryStatfs(resolved);
-  if (fromStatfs) return fromStatfs;
+  const fromStatfs = tryStatfs(probe);
+  if (fromStatfs) return { ...fromStatfs, path: resolved };
 
-  const fromDf = await tryDf(resolved);
-  if (fromDf) return fromDf;
+  const fromDf = await tryDf(probe);
+  if (fromDf) return { ...fromDf, path: resolved };
 
   return {
     path: resolved,

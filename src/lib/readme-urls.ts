@@ -8,7 +8,7 @@ export function isAbsoluteOrSpecialUrl(href: string): boolean {
   if (!href) return true;
   const t = href.trim();
   if (!t) return true;
-  if (/^(https?:|data:|blob:|cid:|mailto:|javascript:)/i.test(t)) return true;
+  if (/^(https?:|data:|blob:|cid:|mailto:|javascript:|vbscript:)/i.test(t)) return true;
   if (t.startsWith('//')) return true;
   if (t.startsWith('#')) return true;
   return false;
@@ -48,7 +48,10 @@ export function normalizeAbsoluteHttpUrl(raw: string): string | null {
   // Skip credentials-in-URL and empty host
   if (u.username || u.password) return null;
   if (!u.hostname) return null;
-  // Skip localhost / private-looking hosts (not useful on Wayback)
+  // Block loopback / metadata / link-local and RFC1918: submitting LAN URLs
+  // to the public Wayback Machine leaks internal hostnames and is never useful.
+  // (Inline to avoid a safe-url import cycle; keep in sync with
+  // isUnsafeOutboundHostname plus RFC1918.)
   const host = u.hostname.toLowerCase();
   if (
     host === 'localhost' ||
@@ -56,7 +59,14 @@ export function normalizeAbsoluteHttpUrl(raw: string): string | null {
     host === '0.0.0.0' ||
     host === '::1' ||
     host.endsWith('.local') ||
-    host.endsWith('.localhost')
+    host.endsWith('.localhost') ||
+    host === 'metadata' ||
+    host === 'metadata.google.internal' ||
+    host === 'kubernetes.default' ||
+    host.startsWith('169.254.') ||
+    host.startsWith('10.') ||
+    host.startsWith('192.168.') ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host)
   ) {
     return null;
   }
@@ -181,7 +191,9 @@ export function mirrorAssetUrl(
 
 /**
  * Rewrite a README asset URL (img src, etc.) to the mirror raw endpoint
- * when relative; leave absolute URLs unchanged.
+ * when relative; leave absolute URLs unchanged. Dangerous schemes
+ * (javascript:/data:/vbscript:) are neutralized to '#' so they can never
+ * become clickable/executable even if sanitization is bypassed.
  */
 export function rewriteReadmeAssetUrl(
   src: string | undefined | null,
@@ -192,6 +204,8 @@ export function rewriteReadmeAssetUrl(
   }
 ): string | undefined {
   if (src == null || src === '') return src ?? undefined;
+  const t = src.trim();
+  if (/^(javascript|vbscript|data|blob):/i.test(t)) return '#';
   if (isAbsoluteOrSpecialUrl(src)) return src;
 
   const repoPath = resolveRepoAssetPath(opts.readmeDir, src);

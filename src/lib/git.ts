@@ -33,6 +33,16 @@ function getMirrorsDir(): string {
   return path.join(dataDir, 'mirrors');
 }
 
+/** Ensure a mirror path stays under DATA_DIR/mirrors (DB is trusted but may be legacy/tampered). */
+export function assertMirrorPathInside(mirrorPath: string): void {
+  const mirrorsDir = getMirrorsDir();
+  const resolved = path.resolve(mirrorPath);
+  const rel = path.relative(path.resolve(mirrorsDir), resolved);
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`mirror_path outside mirrors root: ${mirrorPath.slice(0, 120)}`);
+  }
+}
+
 /**
  * Run git via execFile (no shell) so arguments cannot inject shell metacharacters.
  */
@@ -181,6 +191,7 @@ export async function cloneMirror(
     assertMemory(`clone ${cloneUrl}`);
     assertSafeGitArg(cloneUrl, 'clone_url');
     assertSafeGitArg(mirrorPath, 'mirror_path');
+    assertMirrorPathInside(mirrorPath);
     const dir = path.dirname(mirrorPath);
     fs.mkdirSync(dir, { recursive: true });
 
@@ -188,6 +199,14 @@ export async function cloneMirror(
       if (looksLikeBareRepo(mirrorPath)) {
         await applyGcProtection(mirrorPath);
         return { reused: true };
+      }
+      // Refuse to rm a symlink (could point outside mirrors root).
+      try {
+        if (fs.lstatSync(mirrorPath).isSymbolicLink()) {
+          throw new Error(`Refusing to replace symlink: ${mirrorPath.slice(0, 120)}`);
+        }
+      } catch (e: any) {
+        if (e?.code !== 'ENOENT') throw e;
       }
       fs.rmSync(mirrorPath, { recursive: true, force: true });
     }
@@ -256,6 +275,7 @@ export async function withMirrorLock<T>(
 
 async function applyGcProtection(mirrorPath: string): Promise<void> {
   assertSafeGitArg(mirrorPath, 'mirror_path');
+  assertMirrorPathInside(mirrorPath);
   const settings: [string, string][] = [
     ['gc.auto', '0'],
     ['gc.pruneExpire', 'never'],
@@ -285,6 +305,8 @@ export async function syncMirror(
   mirrorPath: string,
   cloneUrl?: string
 ): Promise<MirrorSyncResult> {
+  assertSafeGitArg(mirrorPath, 'mirror_path');
+  assertMirrorPathInside(mirrorPath);
   assertMemory(`sync ${mirrorPath}`);
   await verifyGcProtection(mirrorPath);
 
@@ -473,11 +495,17 @@ export function isRemoteMissingError(message: string): boolean {
 
 export async function deleteMirror(mirrorPath: string): Promise<void> {
   try {
+    assertMirrorPathInside(mirrorPath);
     const stat = fs.lstatSync(mirrorPath);
     if (stat.isSymbolicLink()) {
       throw new Error(`Refusing to delete symlink: ${mirrorPath}`);
     }
   } catch (err: any) {
+    if (err.code === 'ENOENT') return;
+    // Outside-root or symlink refusal: do not delete, rethrow refusal
+    if (err?.message?.includes('outside mirrors root') || err?.message?.includes('symlink')) {
+      throw err;
+    }
     if (err.code === 'ENOENT') return;
     throw err;
   }
@@ -493,6 +521,8 @@ export async function mirrorStat(mirrorPath: string): Promise<{
   sizeBytes: number;
 }> {
   try {
+    assertSafeGitArg(mirrorPath, 'mirror_path');
+    assertMirrorPathInside(mirrorPath);
     const { stdout: branches } = await runGit([
       '-C',
       mirrorPath,
@@ -525,6 +555,8 @@ function dirSize(dirPath: string): number {
 
 export async function getDefaultBranch(mirrorPath: string): Promise<string> {
   try {
+    assertSafeGitArg(mirrorPath, 'mirror_path');
+    assertMirrorPathInside(mirrorPath);
     const { stdout } = await runGit([
       '-C',
       mirrorPath,
@@ -552,6 +584,8 @@ export async function getDefaultBranch(mirrorPath: string): Promise<string> {
 
 export async function listBranches(mirrorPath: string): Promise<string[]> {
   try {
+    assertSafeGitArg(mirrorPath, 'mirror_path');
+    assertMirrorPathInside(mirrorPath);
     const { stdout } = await runGit([
       '-C',
       mirrorPath,
@@ -568,6 +602,8 @@ export async function listBranches(mirrorPath: string): Promise<string[]> {
 
 export async function listTags(mirrorPath: string): Promise<string[]> {
   try {
+    assertSafeGitArg(mirrorPath, 'mirror_path');
+    assertMirrorPathInside(mirrorPath);
     const { stdout } = await runGit([
       '-C',
       mirrorPath,
@@ -616,10 +652,20 @@ export async function listTree(
   ref: string,
   dirPath: string = ''
 ): Promise<TreeEntry[]> {
+  assertSafeGitArg(mirrorPath, 'mirror_path');
+  assertMirrorPathInside(mirrorPath);
   const safeRef = assertSafeGitArg(ref, 'ref');
-  const treeish = dirPath
-    ? `${safeRef}:${assertSafeGitArg(dirPath.replace(/^\/+|\/+$/g, ''), 'path')}`
-    : safeRef;
+  // Unify path handling via normalizeRepoRelativePath (same traversal rules as
+  // blob/raw) instead of ad-hoc `..` substring checks.
+  let treeish = safeRef;
+  if (dirPath) {
+    const trimmed = dirPath.replace(/^\/+|\/+$/g, '');
+    if (trimmed) {
+      const normalized = normalizeRepoRelativePath('', trimmed);
+      if (normalized == null) throw new Error('Invalid path');
+      treeish = `${safeRef}:${assertSafeGitArg(normalized, 'path')}`;
+    }
+  }
 
   const { stdout } = await runGit(['-C', mirrorPath, 'ls-tree', '-l', treeish]);
 
@@ -667,6 +713,8 @@ export async function getBlob(
   ref: string,
   filePath: string
 ): Promise<BlobResult> {
+  assertSafeGitArg(mirrorPath, 'mirror_path');
+  assertMirrorPathInside(mirrorPath);
   const safeRef = assertSafeGitArg(ref, 'ref');
   const normalized = normalizeRepoRelativePath('', filePath);
   if (normalized == null) {
@@ -730,6 +778,8 @@ export async function getRawFile(
   filePath: string,
   maxBytes: number = MAX_RAW_BYTES
 ): Promise<{ buffer: Buffer; size: number }> {
+  assertSafeGitArg(mirrorPath, 'mirror_path');
+  assertMirrorPathInside(mirrorPath);
   const safeRef = assertSafeGitArg(ref, 'ref');
   // Normalize path: strip leading slashes, reject traversal
   const normalized = normalizeRepoRelativePath('', filePath);
@@ -875,6 +925,8 @@ export async function getCommitInfo(
   ref: string
 ): Promise<{ sha: string; subject: string; author: string; date: string } | null> {
   try {
+    assertSafeGitArg(mirrorPath, 'mirror_path');
+    assertMirrorPathInside(mirrorPath);
     const safeRef = assertSafeGitArg(ref, 'ref');
     const { stdout } = await runGit([
       '-C',
@@ -902,6 +954,8 @@ export async function getReadmeBlob(
   ref: string,
   candidates: string[]
 ): Promise<(BlobResult & { path: string }) | null> {
+  assertSafeGitArg(mirrorPath, 'mirror_path');
+  assertMirrorPathInside(mirrorPath);
   const safeRef = assertSafeGitArg(ref, 'ref');
 
   for (const name of candidates) {

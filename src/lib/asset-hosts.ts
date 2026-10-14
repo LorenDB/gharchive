@@ -345,14 +345,19 @@ export async function downloadMissingAssetsFromHost(
 
     if (asset.size && asset.size > 0 && asset.size > maxBytes) continue;
 
-    const dest = getReleaseAssetPath(
-      archive.platform,
-      archive.owner,
-      archive.name,
-      release.tag_name,
-      asset.name,
-      { isPrivate: Boolean(archive.is_private), userId }
-    );
+    let dest: string;
+    try {
+      dest = getReleaseAssetPath(
+        archive.platform,
+        archive.owner,
+        archive.name,
+        release.tag_name,
+        asset.name,
+        { isPrivate: Boolean(archive.is_private), userId }
+      );
+    } catch {
+      continue;
+    }
 
     const existingFile = resolveExistingAssetFile(dest);
     if (existingFile) {

@@ -67,6 +67,13 @@ export async function GET(req: NextRequest) {
     return NextResponse.redirect(appUrl('/'));
   }
 
+  // Basic rate limit on the callback (token exchange does outbound fetch).
+  const { checkRateLimit } = await import('@/lib/api-auth');
+  const limited = checkRateLimit(req, { maxRequests: 30, windowMs: 60_000 });
+  if (limited) {
+    return redirectLoginError('Too many requests. Please try again.');
+  }
+
   const config = getOidcConfig();
   if (!config) {
     return redirectLoginError('OIDC is not configured');
@@ -90,7 +97,7 @@ export async function GET(req: NextRequest) {
 
   const oauthCookie = req.cookies.get(OAUTH_COOKIE)?.value;
   const oauth = await readOAuthStateToken(oauthCookie);
-  if (!oauth || oauth.state !== state) {
+  if (!oauth || !timingSafeEqual(oauth.state, state)) {
     return redirectLoginError('Invalid or expired OAuth state');
   }
 
@@ -106,16 +113,17 @@ export async function GET(req: NextRequest) {
     // Always validate id_token when present (OIDC Core §3.1.3.7 nonce check).
     // Profile claims often live only on the id_token; userinfo may be sparse
     // (sub-only). Merge both so neither source alone can drop the other.
-    let idClaims: OidcClaims | null = null;
-    if (tokens.id_token) {
-      idClaims = decodeJwtPayload(tokens.id_token, {
-        expectedIssuer: meta.issuer,
-        expectedClientId: config.clientId,
-        expectedNonce: oauth.nonce,
-      });
-      if (!idClaims?.sub) {
-        return redirectLoginError('Invalid id_token from OIDC provider');
-      }
+    // id_token is REQUIRED — never trust userinfo alone for sub/groups.
+    if (!tokens.id_token) {
+      return redirectLoginError('Invalid id_token from OIDC provider');
+    }
+    const idClaims: OidcClaims | null = decodeJwtPayload(tokens.id_token, {
+      expectedIssuer: config.issuer,
+      expectedClientId: config.clientId,
+      expectedNonce: oauth.nonce,
+    });
+    if (!idClaims?.sub) {
+      return redirectLoginError('Invalid id_token from OIDC provider');
     }
 
     let userInfoClaims: OidcClaims | null = null;
@@ -127,6 +135,16 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // Reject if userinfo disagrees on subject — possible token confusion.
+    if (
+      userInfoClaims?.sub &&
+      idClaims.sub &&
+      userInfoClaims.sub !== idClaims.sub
+    ) {
+      console.error('[auth/callback] sub mismatch between id_token and userinfo');
+      return redirectLoginError('Invalid id_token from OIDC provider');
+    }
+
     // Prefer id_token as base (nonce-validated); userinfo overlays non-empty fields.
     const claims = mergeOidcClaims(idClaims, userInfoClaims);
     if (!claims?.sub) {
@@ -135,7 +153,10 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const groups = claims?.groups ?? [];
+    const rawGroups = claims?.groups ?? [];
+    const groups = Array.isArray(rawGroups)
+      ? rawGroups.filter((g): g is string => typeof g === 'string').slice(0, 100)
+      : [];
     const adminGroup = getAdminGroup();
     // Require explicit OIDC_ADMIN_GROUP membership for admin — never default
     // every SSO user to admin (privilege escalation in multi-user deploys).
@@ -149,15 +170,17 @@ export async function GET(req: NextRequest) {
 
     const user: SessionUser = {
       id: claims.sub,
-      username: claimsToUsername(claims),
-      email: claims.email ?? null,
-      name: claims.name ?? null,
+      username: claimsToUsername(claims).slice(0, 128),
+      email:
+        typeof claims.email === 'string' ? claims.email.slice(0, 320) : null,
+      name: typeof claims.name === 'string' ? claims.name.slice(0, 256) : null,
       role: isAdmin ? 'admin' : 'user',
       groups,
     };
 
-    // Register user; first SSO login claims legacy no-auth admin data
-    const { claimed_legacy } = ensureAppUser(user);
+    // Register user; only admins claim legacy no-auth data (prevents the first
+    // arbitrary SSO user from inheriting the autologin PAT/repos).
+    const { claimed_legacy } = ensureAppUser(user, { allowLegacyClaim: isAdmin });
     if (claimed_legacy) {
       console.log(
         `[auth] first SSO user ${user.username} (${user.id}) claimed legacy autologin data`
@@ -175,4 +198,15 @@ export async function GET(req: NextRequest) {
     const message = err instanceof Error ? err.message : 'OIDC callback failed';
     return redirectLoginError('Sign-in failed. Please try again.', message);
   }
+}
+
+/** Constant-time state comparison to avoid leaking prefix via timing. */
+function timingSafeEqual(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const ab = Buffer.from(a, 'utf8');
+  const bb = Buffer.from(b, 'utf8');
+  if (ab.length !== bb.length) return false;
+  let diff = 0;
+  for (let i = 0; i < ab.length; i++) diff |= ab[i]! ^ bb[i]!;
+  return diff === 0;
 }

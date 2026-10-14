@@ -13,6 +13,18 @@ function getDataDir(): string {
   return process.env.DATA_DIR || path.join(process.cwd(), 'data');
 }
 
+/** Keys that must never be assigned from partially-trusted objects. */
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/** Assign only own enumerable keys, skipping prototype-pollution keys. */
+function safeAssign<T extends object>(target: T, source: Record<string, unknown>): T {
+  for (const [k, v] of Object.entries(source)) {
+    if (UNSAFE_KEYS.has(k)) continue;
+    (target as Record<string, unknown>)[k] = v;
+  }
+  return target;
+}
+
 function getDbPath(): string {
   return path.join(getDataDir(), 'db.json');
 }
@@ -1321,10 +1333,14 @@ function hydrateOwned(userId: string): Repo[] {
 // ── Users / legacy claim ────────────────────────────────────────
 
 /**
- * Upsert the SSO (or autologin) user. The first SSO login claims any data
- * created under the no-auth admin account.
+ * Upsert the SSO (or autologin) user. The first *admin* SSO login claims any data
+ * created under the no-auth admin account (gated to avoid an arbitrary user
+ * inheriting the autologin PAT/repos).
  */
-export function ensureAppUser(session: SessionUser): {
+export function ensureAppUser(
+  session: SessionUser,
+  opts: { allowLegacyClaim?: boolean } = {}
+): {
   user: AppUser;
   claimed_legacy: boolean;
 } {
@@ -1346,7 +1362,8 @@ export function ensureAppUser(session: SessionUser): {
 
     if (
       session.id !== AUTOLOGIN_USER_ID &&
-      data!.legacy_claimed_by == null
+      data!.legacy_claimed_by == null &&
+      opts.allowLegacyClaim === true
     ) {
       claimLegacyData(session.id);
       data!.legacy_claimed_by = session.id;
@@ -1726,6 +1743,43 @@ export function getSettingsForUser(userId: string): Settings {
   return normalizeSettings(stored || {});
 }
 
+/**
+ * Effective global upper bound for per-user max_asset_size_mb.
+ * Returns the smallest positive global_max set by any user (admins set this;
+ * regular users default to 0 = no opinion). Non-admins are clamped to it so
+ * an admin's global cap is actually enforced across accounts.
+ */
+export function getEffectiveGlobalMaxAssetSize(): number {
+  const d = load();
+  let cap = 0;
+  for (const s of Object.values(d.settings_by_user)) {
+    const g = (s as Settings).global_max_asset_size_mb;
+    if (typeof g === 'number' && g > 0 && (cap === 0 || g < cap)) cap = g;
+  }
+  return cap;
+}
+
+/** Redacted settings safe to send to the browser (secrets replaced). */
+export function getSettingsPublic(): Settings & {
+  has_wayback_access_key: boolean;
+  has_wayback_secret_key: boolean;
+  has_apprise_urls: boolean;
+} {
+  const s = getSettings();
+  return {
+    ...s,
+    // Never send raw secret values to the client; the UI edits via
+    // placeholder-update (empty = keep, non-empty = replace, "__CLEAR__" = clear).
+    // apprise_urls contain tokens too — the UI shows them for editing because
+    // the user pasted them, but flag presence for masked displays.
+    wayback_access_key: '',
+    wayback_secret_key: '',
+    has_wayback_access_key: Boolean(s.wayback_access_key?.trim()),
+    has_wayback_secret_key: Boolean(s.wayback_secret_key?.trim()),
+    has_apprise_urls: Array.isArray(s.apprise_urls) && s.apprise_urls.length > 0,
+  };
+}
+
 // ── GitHub account ──────────────────────────────────────────────
 
 export function getGithubAccount(): GithubAccount | null {
@@ -1876,7 +1930,7 @@ export function updateArchive(
   load();
   const idx = data!.archives.findIndex((a) => a.id === id);
   if (idx >= 0) {
-    Object.assign(data!.archives[idx], updates);
+    safeAssign(data!.archives[idx]!, updates as Record<string, unknown>);
     save();
   }
 }
@@ -1899,6 +1953,9 @@ export function createArchive(
 
 /**
  * Create a membership linking the current (or specified) user to an archive.
+ * `owner_id` is only honored for background jobs with no user context
+ * (scheduler); request handlers always link to the authenticated user so a
+ * caller cannot mint memberships for arbitrary users.
  */
 export function linkUserToArchive(
   archiveId: number,
@@ -1910,7 +1967,8 @@ export function linkUserToArchive(
   } = {}
 ): Repo {
   load();
-  const ownerId = opts.owner_id || uid();
+  const ctxUser = tryGetUserId();
+  const ownerId = ctxUser || opts.owner_id || uid();
   const existing = data!.repos.find(
     (r) => r.owner_id === ownerId && r.archive_id === archiveId
   );
@@ -2046,14 +2104,34 @@ export type RepoUpdatableFields = RepoMembershipUpdatableFields &
 /**
  * Update membership and/or archive fields for a membership id.
  * When no ALS user is set, any membership id may be updated (scheduler).
+ * When the per-repo retention policy changes, assets outside the new
+ * effective policy are pruned immediately to free disk space.
+ * Only allowlisted archive keys are applied (prevents __proto__ pollution
+ * and shared-archive poisoning via unexpected keys).
+ * @returns number of asset files pruned (0 when policy unchanged)
  */
-export function updateRepo(id: number, updates: RepoUpdatableFields) {
+const ARCHIVE_UPDATE_ALLOWLIST: (keyof ArchiveUpdatableFields)[] = [
+  'last_synced_at',
+  'remote_description',
+  'topics',
+  'language',
+  'homepage',
+  'stargazers_count',
+  'forks_count',
+  'license',
+  'is_archived',
+  'is_fork',
+  'remote_deleted_at',
+  'remote_updated_at',
+  'remote_meta_synced_at',
+];
+export function updateRepo(id: number, updates: RepoUpdatableFields): number {
   load();
   const userId = tryGetUserId();
   const idx = data!.repos.findIndex(
     (r) => r.id === id && (userId ? r.owner_id === userId : true)
   );
-  if (idx < 0) return;
+  if (idx < 0) return 0;
 
   const membershipKeys: (keyof RepoMembershipUpdatableFields)[] = [
     'from_star',
@@ -2066,22 +2144,34 @@ export function updateRepo(id: number, updates: RepoUpdatableFields) {
   const archiveUpdates: ArchiveUpdatableFields = {};
 
   for (const [k, v] of Object.entries(updates)) {
+    if (UNSAFE_KEYS.has(k)) continue;
     if (membershipKeys.includes(k as keyof RepoMembershipUpdatableFields)) {
       (membershipUpdates as any)[k] = v;
-    } else {
+    } else if ((ARCHIVE_UPDATE_ALLOWLIST as string[]).includes(k)) {
       (archiveUpdates as any)[k] = v;
     }
+    // Unknown keys (clone_url, mirror_path, is_private, __proto__, …) are
+    // dropped — the request PATCH route only exposes the allowlist anyway.
   }
 
   if (Object.keys(membershipUpdates).length) {
-    Object.assign(data!.repos[idx], membershipUpdates);
+    safeAssign(data!.repos[idx]!, membershipUpdates as Record<string, unknown>);
   }
   if (Object.keys(archiveUpdates).length) {
     const archiveId = data!.repos[idx].archive_id;
     const aidx = data!.archives.findIndex((a) => a.id === archiveId);
-    if (aidx >= 0) Object.assign(data!.archives[aidx], archiveUpdates);
+    if (aidx >= 0) safeAssign(data!.archives[aidx]!, archiveUpdates as Record<string, unknown>);
   }
   save();
+
+  if (
+    'release_asset_mode' in membershipUpdates ||
+    'release_asset_keep_last' in membershipUpdates
+  ) {
+    const archiveId = data!.repos[idx].archive_id;
+    return pruneReleaseAssets(archiveId);
+  }
+  return 0;
 }
 
 /**
@@ -2188,9 +2278,13 @@ export function addList(
 ): List {
   load();
   const now = new Date().toISOString();
+  // Ignore caller-supplied owner_id when a user context is active (IDOR).
+  const ctxUser = tryGetUserId();
+  const { owner_id: _ignored, ...rest } = input as Record<string, unknown>;
+  void _ignored;
   const list: List = {
-    ...input,
-    owner_id: input.owner_id || uid(),
+    ...(rest as Omit<List, 'id' | 'created_at' | 'updated_at' | 'owner_id'>),
+    owner_id: ctxUser || (input.owner_id || uid()),
     id: nextIds.lists++,
     created_at: now,
     updated_at: now,
@@ -2229,9 +2323,13 @@ export function updateList(
     (l) => l.id === id && l.owner_id === userId
   );
   if (idx < 0) return null;
-  Object.assign(data!.lists[idx], updates, {
-    updated_at: new Date().toISOString(),
-  });
+  const clean: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(updates)) {
+    if (UNSAFE_KEYS.has(k)) continue;
+    clean[k] = v;
+  }
+  safeAssign(data!.lists[idx]!, clean);
+  (data!.lists[idx] as List).updated_at = new Date().toISOString();
   save();
   return { ...data!.lists[idx] };
 }
@@ -2439,7 +2537,12 @@ export function updateReleaseAsset(
   load();
   const idx = data!.release_assets.findIndex((a) => a.id === id);
   if (idx < 0) return;
-  Object.assign(data!.release_assets[idx], updates);
+  const clean: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(updates)) {
+    if (UNSAFE_KEYS.has(k)) continue;
+    clean[k] = v;
+  }
+  safeAssign(data!.release_assets[idx]!, clean);
   save();
 }
 
@@ -2562,6 +2665,8 @@ export function getArchiveReleaseAssetPolicy(
 /**
  * Drop on-disk release assets that fall outside the keep policy.
  * Metadata rows remain; only `file_path` is cleared and files unlinked.
+ * Also removes the storage-compression companion (logical ↔ `.storage.gz`)
+ * so no orphaned copy is left behind.
  * @returns number of asset files dropped
  */
 export function pruneReleaseAssets(
@@ -2581,6 +2686,7 @@ export function pruneReleaseAssets(
   }
   // mode === 'none' → keepIds empty
 
+  const STORAGE_SUFFIX = '.storage.gz';
   let dropped = 0;
   let dirty = false;
   for (const asset of data!.release_assets) {
@@ -2593,6 +2699,14 @@ export function pruneReleaseAssets(
       if (fs.existsSync(asset.file_path)) {
         fs.unlinkSync(asset.file_path);
       }
+      // Delete the compression companion if it exists (e.g. raw path
+      // recorded but a `.storage.gz` copy lingers, or vice versa).
+      const companion = asset.file_path.endsWith(STORAGE_SUFFIX)
+        ? asset.file_path.slice(0, -STORAGE_SUFFIX.length)
+        : asset.file_path + STORAGE_SUFFIX;
+      if (fs.existsSync(companion)) {
+        fs.unlinkSync(companion);
+      }
     } catch {
       // best-effort file cleanup
     }
@@ -2603,4 +2717,47 @@ export function pruneReleaseAssets(
   }
   if (dirty) save();
   return dropped;
+}
+
+/**
+ * Prune every archive the given user is a member of, using each archive's
+ * most-permissive member policy. Used after a global retention change so
+ * repos inheriting the default flush unneeded assets immediately.
+ * @returns total number of asset files dropped
+ */
+export function pruneUserArchives(userId: string): number {
+  load();
+  const archiveIds = new Set<number>();
+  for (const m of data!.repos) {
+    if (m.owner_id === userId) archiveIds.add(m.archive_id);
+  }
+  let total = 0;
+  for (const archiveId of archiveIds) {
+    total += pruneReleaseAssets(archiveId);
+  }
+  return total;
+}
+
+/**
+ * Prune every known archive using its most-permissive member policy.
+ * Runs once at app startup so assets left outside the retention policy
+ * (e.g. policy tightened while the app was down, or files restored from
+ * backup) are flushed without waiting for the next sync.
+ * @returns total number of asset files dropped
+ */
+export function pruneAllArchives(): number {
+  load();
+  const archiveIds = new Set<number>();
+  for (const m of data!.repos) archiveIds.add(m.archive_id);
+  // Include memberless archives too (orphans awaiting cleanup)
+  for (const a of data!.archives) archiveIds.add(a.id);
+  let total = 0;
+  for (const archiveId of archiveIds) {
+    try {
+      total += pruneReleaseAssets(archiveId);
+    } catch {
+      // best-effort per archive — never fail the whole sweep
+    }
+  }
+  return total;
 }

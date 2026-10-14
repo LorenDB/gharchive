@@ -75,7 +75,8 @@ function headers(token: string): Record<string, string> {
 }
 
 export async function validateGithubToken(token: string): Promise<GhUser> {
-  const res = await fetch(`${GITHUB_API}/user`, { headers: headers(token) });
+  const res = await fetch(`${GITHUB_API}/user`, {
+      signal: AbortSignal.timeout(30_000), headers: headers(token) });
   if (res.status === 401) {
     throw new Error('Invalid GitHub token');
   }
@@ -102,6 +103,7 @@ export async function fetchStarredRepos(
   while (true) {
     const url = `${GITHUB_API}/user/starred?per_page=${perPage}&page=${page}&sort=created&direction=desc`;
     const res = await fetch(url, {
+      signal: AbortSignal.timeout(30_000),
       headers: {
         ...headers(token),
         // star+json includes starred_at
@@ -176,6 +178,7 @@ export async function fetchStarLists(token: string): Promise<GhStarList[]> {
     `;
 
     const gqlRes: Response = await fetch(GITHUB_GQL, {
+      signal: AbortSignal.timeout(30_000),
       method: 'POST',
       headers: {
         ...headers(token),
@@ -254,6 +257,7 @@ async function fetchListItemsPage(
     }
   `;
   const res = await fetch(GITHUB_GQL, {
+      signal: AbortSignal.timeout(30_000),
     method: 'POST',
     headers: {
       ...headers(token),
@@ -314,7 +318,8 @@ export async function fetchOwnedRepos(
     const url =
       `${GITHUB_API}/user/repos?affiliation=owner&per_page=${perPage}` +
       `&page=${page}&sort=updated&direction=desc`;
-    const res = await fetch(url, { headers: headers(token) });
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(30_000), headers: headers(token) });
     if (!res.ok) {
       throw new Error(`Failed to fetch owned repos: GitHub ${res.status}`);
     }

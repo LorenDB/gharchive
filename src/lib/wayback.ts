@@ -106,10 +106,16 @@ export async function saveUrlToWayback(
       signal: AbortSignal.timeout(30_000),
     });
 
-    const text = await res.text();
+    const cl = res.headers.get('content-length');
+    if (cl && Number(cl) > 64 * 1024) {
+      return { url, ok: false, error: `HTTP ${res.status} (response too large)` };
+    }
+    const text = await res.text().catch(() => '');
+    // Cap bodies (IA may return HTML error pages).
+    const capped = text.slice(0, 2000);
     let data: Record<string, unknown> = {};
     try {
-      data = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+      data = capped ? (JSON.parse(capped) as Record<string, unknown>) : {};
     } catch {
       // non-JSON body
     }

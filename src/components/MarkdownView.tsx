@@ -10,6 +10,10 @@ import { rewriteReadmeAssetUrl } from '@/lib/readme-urls';
 /**
  * Sanitize schema based on GitHub's defaults, plus attributes commonly
  * used in README HTML tables/images (align, width, etc.).
+ *
+ * NOTE: rehype-raw must run BEFORE rehype-sanitize (see plugins below) —
+ * never reorder, or raw HTML would bypass sanitization. `style` is not
+ * allowlisted (CSS exfiltration); `a[name/id]` dropped (DOM clobbering).
  */
 const readmeSchema = {
   ...defaultSchema,
@@ -43,16 +47,12 @@ const readmeSchema = {
       'align',
       'width',
       'height',
-      ['style', /^max-width/i],
     ],
-    a: [...(defaultSchema.attributes?.a || []), 'name', 'id'],
     div: [...(defaultSchema.attributes?.div || []), 'align'],
     p: [...(defaultSchema.attributes?.p || []), 'align'],
     h1: [...(defaultSchema.attributes?.h1 || []), 'align'],
     h2: [...(defaultSchema.attributes?.h2 || []), 'align'],
     h3: [...(defaultSchema.attributes?.h3 || []), 'align'],
-    code: [...(defaultSchema.attributes?.code || []), 'className'],
-    span: [...(defaultSchema.attributes?.span || []), 'className', 'align'],
   },
   tagNames: [
     ...(defaultSchema.tagNames || []),
@@ -88,24 +88,29 @@ export default function MarkdownView({
 }: MarkdownViewProps) {
   const components = useMemo(() => {
     return {
-      a: ({ href, children, ...props }: any) => (
-        <a
-          href={href}
-          target={href?.startsWith('#') ? undefined : '_blank'}
-          rel={href?.startsWith('#') ? undefined : 'noopener noreferrer'}
-          {...props}
-        >
-          {children}
-        </a>
-      ),
+      a: ({ href, children, ...props }: any) => {
+        const safeHref = isSafeLinkHref(href) ? href : '#';
+        return (
+          <a
+            href={safeHref}
+            target={safeHref?.startsWith('#') ? undefined : '_blank'}
+            rel={safeHref?.startsWith('#') ? undefined : 'noopener noreferrer'}
+            {...props}
+          >
+            {children}
+          </a>
+        );
+      },
       img: ({ src, alt, ...props }: any) => {
         const resolved = assetContext
           ? rewriteReadmeAssetUrl(src, assetContext)
           : src;
+        // Block non-http(s)/mirror-relative srcs that slipped past sanitize.
+        const safeSrc = isSafeImgSrc(resolved) ? resolved : undefined;
         // eslint-disable-next-line @next/next/no-img-element
         return (
           <img
-            src={resolved}
+            src={safeSrc}
             alt={alt || ''}
             loading="lazy"
             className="max-w-full rounded-lg border border-ink-800"
@@ -163,4 +168,28 @@ export default function MarkdownView({
       </ReactMarkdown>
     </div>
   );
+}
+
+/** Explicit protocol allowlist — never rely solely on the sanitizer. */
+function isSafeLinkHref(href: string | undefined): boolean {
+  if (!href) return false;
+  const t = href.trim();
+  if (!t) return false;
+  if (t.startsWith('#')) return true;
+  if (t.startsWith('/')) {
+    if (t.startsWith('//')) return false;
+    return true;
+  }
+  try {
+    const u = new URL(t);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    // Relative path without leading / (e.g. docs/img.png rewritten upstream)
+    return !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(t);
+  }
+}
+
+function isSafeImgSrc(src: string | undefined): boolean {
+  if (!src) return false;
+  return isSafeLinkHref(src);
 }

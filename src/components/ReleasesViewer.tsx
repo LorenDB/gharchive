@@ -92,9 +92,15 @@ export default function ReleasesViewer({
                     <ul className="divide-y divide-ink-800/80 rounded-lg border border-ink-800 overflow-hidden">
                       {rel.assets.map((asset) => {
                         const isLocal = Boolean(asset.file_path);
+                        // Upstream download_url is untrusted — only https: links
+                        // become clickable; javascript:/data: become inert text.
+                        const remoteHref =
+                          !isLocal && typeof asset.download_url === 'string'
+                            ? safeRemoteHref(asset.download_url)
+                            : undefined;
                         const href = isLocal
                           ? `/api/repos/${repoId}/assets/${asset.id}`
-                          : asset.download_url || undefined;
+                          : remoteHref;
 
                         return (
                           <li
@@ -161,6 +167,16 @@ export default function ReleasesViewer({
       })}
     </div>
   );
+}
+
+function safeRemoteHref(url: string): string | undefined {
+  try {
+    const u = new URL(url);
+    if (u.protocol === 'https:' && !u.username && !u.password) return url;
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function PackageIcon() {

@@ -548,6 +548,22 @@ async function importOne(item: ImportItem, listMap: Map<string, List>) {
     item.clone_url || defaultCloneUrl(platform, item.owner, item.name);
   const isPrivate = Boolean(item.is_private);
 
+  // Validate the clone URL (SSRF/charset) and ensure its identity matches the
+  // requested owner/name — GitHub API fields are upstream-controlled.
+  try {
+    const { parseCloneUrl } = await import('@/lib/releases');
+    const ident = parseCloneUrl(cloneUrl);
+    const norm = (s: string) => s.toLowerCase().replace(/\.git$/, '');
+    if (
+      norm(ident.owner) !== norm(item.owner) ||
+      norm(ident.repo) !== norm(item.name)
+    ) {
+      throw new Error('Clone URL identity mismatch');
+    }
+  } catch (err: any) {
+    throw new Error(`Invalid clone URL: ${err?.message || err}`);
+  }
+
   let repo;
   let linkedOnly = false;
 

@@ -30,6 +30,9 @@ function safeReturnTo(path: string | null): string {
 }
 
 export async function GET(req: NextRequest) {
+  const { checkRateLimit } = await import('@/lib/api-auth');
+  const limited = checkRateLimit(req, { maxRequests: 30, windowMs: 60_000 });
+  if (limited) return limited;
   if (!isOidcConfigured()) {
     return NextResponse.redirect(appUrl('/'));
   }

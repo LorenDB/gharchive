@@ -3,6 +3,13 @@
 set -e
 
 DATA_DIR="${DATA_DIR:-/data}"
+# Refuse dangerous DATA_DIR values: chown -R on / or /etc would rechown the host.
+case "$DATA_DIR" in
+  ""|/|/etc|/etc/*|/bin|/bin/*|/sbin|/sbin/*|/usr|/usr/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*)
+    echo "[entrypoint] ERROR: refusing dangerous DATA_DIR=${DATA_DIR}" >&2
+    exit 1
+    ;;
+esac
 mkdir -p "$DATA_DIR"
 
 if [ "$(id -u)" = "0" ]; then

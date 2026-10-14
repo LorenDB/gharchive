@@ -8,7 +8,9 @@ import { appUrl, isOidcConfigured } from '@/lib/oidc';
 
 export async function GET() {
   const url = appUrl(isOidcConfigured() ? '/login' : '/');
-  return NextResponse.redirect(url);
+  const res = NextResponse.redirect(url);
+  clearSession(res);
+  return res;
 }
 
 function clearSession(res: NextResponse): void {

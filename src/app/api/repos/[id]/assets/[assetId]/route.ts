@@ -80,7 +80,28 @@ export async function GET(
         );
       }
 
-      const onDisk = fs.readFileSync(asset.file_path);
+      const onDisk = (() => {
+        try {
+          const st = fs.statSync(asset.file_path!);
+          // Refuse to buffer absurd files into memory (DoS).
+          if (st.size > 512 * 1024 * 1024) {
+            return null;
+          }
+        } catch {
+          return null;
+        }
+        try {
+          return fs.readFileSync(asset.file_path!);
+        } catch {
+          return null;
+        }
+      })();
+      if (!onDisk) {
+        return NextResponse.json(
+          { error: 'Asset file not available locally' },
+          { status: 404 }
+        );
+      }
       const wasCompressed =
         Boolean(asset.storage_compressed) ||
         isStorageCompressedPath(asset.file_path);

@@ -336,13 +336,46 @@ export async function syncRepo(
           `Downloading release ${releaseIdx}/${releases.length}`
         );
 
+        // Validate upstream-controlled tag before touching disk/DB — a
+        // malicious tag (../, leading -, oversize) must skip only this
+        // release, never abort the whole sync.
+        if (
+          typeof rel.tag_name !== 'string' ||
+          !rel.tag_name ||
+          rel.tag_name.length > 255 ||
+          rel.tag_name.includes('..') ||
+          rel.tag_name.includes('/') ||
+          rel.tag_name.includes('\\') ||
+          rel.tag_name.startsWith('-') ||
+          /[\0\n\r]/.test(rel.tag_name)
+        ) {
+          console.warn(`[sync] skipping release with invalid tag: ${String(rel.tag_name).slice(0, 80)}`);
+          continue;
+        }
+
         const releaseRow = getReleaseByTag(archiveId, rel.tag_name);
         if (!releaseRow) continue;
 
         const shouldCacheAssets = cacheableReleaseIds.has(releaseRow.id);
 
         for (const asset of rel.assets) {
-          const existing = findReleaseAsset(releaseRow.id, asset.name);
+          try {
+            // Validate upstream-controlled filename per asset.
+            if (
+              typeof asset.name !== 'string' ||
+              !asset.name ||
+              asset.name.length > 255 ||
+              asset.name.includes('..') ||
+              asset.name.includes('/') ||
+              asset.name.includes('\\') ||
+              asset.name.startsWith('-') ||
+              /[\0\n\r]/.test(asset.name)
+            ) {
+              console.warn(`[sync] skipping asset with invalid name: ${String(asset.name).slice(0, 80)}`);
+              skippedAssets++;
+              continue;
+            }
+            const existing = findReleaseAsset(releaseRow.id, asset.name);
           // Already local — skip
           if (
             existing?.file_path &&
@@ -470,6 +503,13 @@ export async function syncRepo(
               storage_compressed: downloaded ? storageCompressed : false,
             });
             if (downloaded) newAssets++;
+          }
+          } catch (assetErr: any) {
+            // One hostile asset (bad tag/filename, disk error) must not abort
+            // the whole release loop.
+            console.warn(`[sync] skipping asset after error: ${assetErr?.message || assetErr}`);
+            skippedAssets++;
+            continue;
           }
         }
       }
