@@ -29,6 +29,7 @@ import { checkRemoteRepoExists } from '@/lib/remote-exists';
 import { knownApiKind } from '@/lib/platform';
 import { fetchRemoteRepoMeta } from '@/lib/remote-meta';
 import { hasEnoughMemory } from '@/lib/memory';
+import { getDiskInfo, isStorageLow } from '@/lib/disk';
 import { sendAlert, repoLabel } from '@/lib/alerts';
 import {
   classifyAssetHost,
@@ -311,6 +312,7 @@ export async function syncRepo(
       let newReleases = 0;
       let newAssets = 0;
       let skippedAssets = 0;
+      let diskSkipped = 0;
       let awaitingHostApproval = 0;
       const pendingHosts = new Set<string>();
       const maxBytes =
@@ -321,6 +323,28 @@ export async function syncRepo(
       const downloadPolicy = resolveReleaseAssetPolicy(settings, repo);
 
       options.onProgress?.(`Fetching ${releases.length} releases...`);
+
+      // Disk safety valve: when the disk is already at/below the user's
+      // low-storage thresholds, skip asset downloads (metadata still syncs
+      // and pruning still runs). Without this a full disk turns every sync
+      // into an ENOSPC error loop instead of recovering.
+      let diskGate: string | null = null;
+      try {
+        const disk = await getDiskInfo();
+        if (disk.available) {
+          const low = isStorageLow(
+            disk,
+            settings.storage_alert_threshold_percent,
+            settings.storage_alert_min_free_mb
+          );
+          if (low.low) {
+            diskGate = low.reason || 'disk storage low';
+            messages.push(`assets: downloads held (${diskGate})`);
+          }
+        }
+      } catch {
+        // Disk probe failed — proceed as before (fail open).
+      }
 
       // Pass 1: upsert release metadata for every remote release
       for (const rel of releases) {
@@ -421,9 +445,14 @@ export async function syncRepo(
             | 'size'
             | 'host'
             | 'rejected'
+            | 'disk'
             | null = null;
 
-          if (!shouldCacheAssets) {
+          if (diskGate) {
+            skipReason = 'disk';
+            skippedAssets++;
+            diskSkipped++;
+          } else if (!shouldCacheAssets) {
             skipReason = 'policy';
             skippedAssets++;
           } else if (tooLarge) {
@@ -495,6 +524,15 @@ export async function syncRepo(
                   downloaded = true;
                   storedPath = result.filePath || assetPath;
                   storageCompressed = Boolean(result.storageCompressed);
+                } else if (result.error === 'enospc') {
+                  // Disk filled mid-sync: hold the rest of this sync's
+                  // downloads quietly instead of erroring per asset.
+                  if (!diskGate) {
+                    diskGate = 'disk full (ENOSPC during sync)';
+                    messages.push(`assets: downloads held (${diskGate})`);
+                  }
+                  skippedAssets++;
+                  diskSkipped++;
                 }
               }
             }
@@ -538,11 +576,14 @@ export async function syncRepo(
 
       let releaseMsg = `releases: ${releases.length} fetched (${newReleases} new, ${newAssets} assets)`;
       if (skippedAssets > 0) releaseMsg += `, ${skippedAssets} skipped`;
+      if (diskSkipped > 0) releaseMsg += ` (${diskSkipped} held: low disk)`;
       if (pruned > 0) releaseMsg += `, ${pruned} pruned`;
       if (downloadPolicy.mode === 'last_n') {
         releaseMsg += ` [keep last ${downloadPolicy.keep_last}]`;
       } else if (downloadPolicy.mode === 'none') {
         releaseMsg += ' [assets off]';
+      } else {
+        releaseMsg += ' [all assets]';
       }
       if (awaitingHostApproval > 0) {
         releaseMsg += `, ${awaitingHostApproval} awaiting domain approval (${[...pendingHosts].join(', ')})`;

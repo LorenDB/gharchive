@@ -288,6 +288,26 @@ export async function downloadMissingAssetsFromHost(
     return 0;
   }
 
+  // Same disk safety valve as syncRepo: don't start downloads when the disk
+  // is already at/below the user's low-storage thresholds.
+  try {
+    const { getDiskInfo, isStorageLow } = await import('@/lib/disk');
+    const disk = await getDiskInfo();
+    if (disk.available) {
+      const low = isStorageLow(
+        disk,
+        settings.storage_alert_threshold_percent,
+        settings.storage_alert_min_free_mb
+      );
+      if (low.low) {
+        console.warn(`[assets] downloads held (${low.reason || 'disk storage low'})`);
+        return 0;
+      }
+    }
+  } catch {
+    // Disk probe failed — proceed as before (fail open).
+  }
+
   const userId = tryGetUserId() ?? AUTOLOGIN_USER_ID;
   const db = getDb();
   const userRepos = db.repos;
@@ -380,6 +400,9 @@ export async function downloadMissingAssetsFromHost(
         storage_compressed: Boolean(result.storageCompressed),
       });
       downloaded++;
+    } else if (result.error === 'enospc') {
+      console.warn('[assets] downloads held (disk full during backfill)');
+      break;
     }
   }
 

@@ -331,6 +331,8 @@ export type DownloadAssetResult = {
   filePath?: string;
   /** True when bytes on disk are gzipped for storage. */
   storageCompressed?: boolean;
+  /** Machine-readable failure reason when `ok` is false. */
+  error?: 'untrusted' | 'too_large' | 'enospc' | 'write_failed' | 'fetch_failed' | 'low_memory';
 };
 
 function notifyUntrustedHost(
@@ -356,7 +358,7 @@ export async function downloadReleaseAsset(
     if (!trusted) {
       console.warn(`[releases] refusing untrusted asset URL: ${url.slice(0, 120)}`);
       notifyUntrustedHost(url, options.onUntrustedHost);
-      return { ok: false };
+      return { ok: false, error: 'untrusted' };
     }
 
     // Bound wire bytes by actual setting, not upstream `size` (spoofable).
@@ -374,7 +376,7 @@ export async function downloadReleaseAsset(
     const memCheck = hasEnoughMemory(64);
     if (!memCheck.ok) {
       console.warn(`[releases] skipping asset download (${memCheck.reason}): ${url}`);
-      return { ok: false };
+      return { ok: false, error: 'low_memory' };
     }
 
     const dir = path.dirname(destPath);
@@ -397,7 +399,7 @@ export async function downloadReleaseAsset(
       });
       if (res.status >= 300 && res.status < 400) {
         const loc = res.headers.get('location');
-        if (!loc) return { ok: false };
+        if (!loc) return { ok: false, error: 'fetch_failed' };
         const absolute = new URL(loc, current).toString();
         const next = parseTrustedAssetUrl(absolute, options.extraTrustedHosts);
         if (!next) {
@@ -405,14 +407,14 @@ export async function downloadReleaseAsset(
             `[releases] asset redirect to untrusted host blocked: ${loc.slice(0, 120)}`
           );
           notifyUntrustedHost(absolute, options.onUntrustedHost);
-          return { ok: false };
+          return { ok: false, error: 'untrusted' };
         }
         current = next;
         continue;
       }
       break;
     }
-    if (!res || !res.ok) return { ok: false };
+    if (!res || !res.ok) return { ok: false, error: 'fetch_failed' };
 
     // Pre-check Content-Length (when the server sends one) before buffering.
     const contentLength = res.headers.get('content-length');
@@ -420,7 +422,7 @@ export async function downloadReleaseAsset(
       const len = Number(contentLength);
       if (Number.isFinite(len) && len > capBytes) {
         console.warn(`[releases] asset too large (Content-Length ${len}): ${url.slice(0, 120)}`);
-        return { ok: false };
+        return { ok: false, error: 'too_large' };
       }
     }
 
@@ -428,7 +430,7 @@ export async function downloadReleaseAsset(
     // Enforce cap on actual wire bytes (Content-Length may be absent/lying).
     if (raw.length > capBytes) {
       console.warn(`[releases] asset too large (${raw.length} bytes): ${url.slice(0, 120)}`);
-      return { ok: false };
+      return { ok: false, error: 'too_large' };
     }
     let outPath = destPath;
     let storageCompressed = false;
@@ -444,10 +446,19 @@ export async function downloadReleaseAsset(
       }
     }
 
-    fs.writeFileSync(outPath, toWrite);
+    try {
+      fs.writeFileSync(outPath, toWrite);
+    } catch (err: any) {
+      // Surface ENOSPC so callers can stop hammering a full disk quietly
+      // instead of erroring per asset.
+      if (err?.code === 'ENOSPC') {
+        return { ok: false, error: 'enospc' };
+      }
+      return { ok: false, error: 'write_failed' };
+    }
     return { ok: true, filePath: outPath, storageCompressed };
   } catch {
-    return { ok: false };
+    return { ok: false, error: 'fetch_failed' };
   }
 }
 

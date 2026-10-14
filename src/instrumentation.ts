@@ -13,11 +13,22 @@ export async function register() {
     // tightened while the app was down) before the scheduler starts.
     try {
       const pruned = pruneAllArchives();
-      if (pruned > 0) {
-        console.log(
-          `[startup] autoprune dropped ${pruned} release asset(s) outside retention policy`
-        );
+      const { listArchives, getAllReleaseAssets } = await import('./lib/db');
+      let archives = 0;
+      let tracked = 0;
+      try {
+        archives = listArchives().length;
+        tracked = getAllReleaseAssets().length;
+      } catch {
+        // counts are best-effort
       }
+      console.log(
+        `[startup] autoprune: ${pruned} asset(s) dropped outside retention ` +
+          `(${archives} archives, ${tracked} assets tracked)` +
+          (pruned === 0 && tracked > 0
+            ? ' — if disk is full, check Settings → release asset mode (prune keeps everything when policy is "all")'
+            : '')
+      );
     } catch (err) {
       console.error('[startup] autoprune failed:', err);
     }
