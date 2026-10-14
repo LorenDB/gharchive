@@ -1,4 +1,4 @@
-import { getSettings, listUserIds, listArchives, DEFAULT_SETTINGS } from '@/lib/db';
+import { getSettings, listUserIds, listArchives, pruneReleaseAssets, DEFAULT_SETTINGS } from '@/lib/db';
 import { getGithubAccount, getGithubToken } from '@/lib/db';
 import { getDb } from '@/lib/db';
 import type { Settings } from '@/lib/db';
@@ -138,6 +138,25 @@ export async function runScheduledSync(
         let uSynced = 0;
         let uFailed = 0;
         let uSkippedShared = due.length - work.length;
+
+        // Prune before any downloads occur: flush assets outside the
+        // retention window before git fetches / release downloads start, so
+        // peak disk usage stays low. Per-archive (most-permissive member
+        // policy) — syncRepo also pre-prunes per repo, this sweep just runs
+        // ahead of the concurrent pool.
+        let uPrePruned = 0;
+        for (const r of work) {
+          try {
+            uPrePruned += pruneReleaseAssets(r.archive_id);
+          } catch {
+            // best-effort per archive — never fail the sweep
+          }
+        }
+        if (uPrePruned > 0) {
+          console.log(
+            `[scheduler] pre-sync prune dropped ${uPrePruned} asset(s) outside retention`
+          );
+        }
 
         const adjustedConcurrency = getAdjustedConcurrency(settings.concurrent_syncs);
         if (adjustedConcurrency < 1 && work.length > 0) {

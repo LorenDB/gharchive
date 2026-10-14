@@ -72,6 +72,24 @@ export async function syncRepo(
   const archiveId = repo.archive_id;
   const isPrivate = Boolean(repo.is_private);
 
+  // Prune before any network/disk writes: drop local assets already outside
+  // the retention window so the git fetch + new downloads below don't spike
+  // disk usage. Uses the most-permissive member policy, so shared archives
+  // never lose files another member still wants.
+  try {
+    const prePruned = pruneReleaseAssets(archiveId);
+    if (prePruned > 0) {
+      messages.push(
+        `prune: ${prePruned} asset(s) outside retention dropped before sync`
+      );
+    }
+  } catch (err: any) {
+    console.warn(
+      `[sync] pre-sync prune failed for ${label}:`,
+      err?.message || err
+    );
+  }
+
   if (!options.skipGit) {
     const memCheck = hasEnoughMemory();
     if (!memCheck.ok) {
