@@ -23,6 +23,9 @@ import {
 } from '@/lib/session';
 import { ensureAppUser } from '@/lib/db';
 
+// Auth mode depends on runtime env (Docker .env) — never bake at build time.
+export const dynamic = 'force-dynamic';
+
 /** Same-origin relative path only (no protocol-relative or scheme smuggling). */
 function safeReturnTo(path: string | null | undefined): string {
   if (!path || typeof path !== 'string') return '/';

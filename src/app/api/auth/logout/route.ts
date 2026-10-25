@@ -6,6 +6,9 @@ import {
 } from '@/lib/session';
 import { appUrl, isOidcConfigured } from '@/lib/oidc';
 
+// Auth mode depends on runtime env (Docker .env) — never bake at build time.
+export const dynamic = 'force-dynamic';
+
 export async function GET() {
   const url = appUrl(isOidcConfigured() ? '/login' : '/');
   const res = NextResponse.redirect(url);
